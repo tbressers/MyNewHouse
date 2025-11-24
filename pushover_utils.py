@@ -26,7 +26,7 @@ def send_error_notification(error_message: str, context: str = "MyNewHouse Error
         bool: True if notification was sent successfully, False otherwise
     """
     # Always log the error first
-    logger.error(f"{error_message}")        
+    print(f"{error_message}")        
 #    sys.exit(1)
     
     try:

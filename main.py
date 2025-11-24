@@ -56,13 +56,57 @@ SITES = [
         "wait_until": "networkidle"
     },
     {
-        "name": "marktplaats",
-        "url": "https://www.marktplaats.nl/l/huizen-en-kamers/kamers-te-huur/f/nijmegen/4589/",
-        "selector": "[data-testid='listing']",
+        "name": "pararius",
+        "url": "https://www.pararius.nl/huurwoningen/nijmegen/studentenhuisvesting",
+        "selector": ".search-list__item, article, [data-testid='search-item']",
         "item_fields": [
-            {"type": "text", "selector": "[data-testid='title']"},
-            {"type": "text", "selector": "[data-testid='price']"},
-            {"type": "href", "selector": "a[href*='/v/']"}
+            {"type": "text", "selector": ".search-list__item h2, h3 a"},
+            {"type": "href", "selector": "a[href*='/kamer/']"},
+            {"type": "text", "selector": ".search-list__item .price, .price"}
+        ],
+        "wait_until": "networkidle"
+    },
+    {
+        "name": "kamernijmegen",
+        "url": "https://www.kamernijmegen.com/",
+        "selector": "a[href*='/kamer-nijmegen/']",
+        "item_fields": [
+            {"type": "text", "selector": "a"},
+            {"type": "href", "selector": "a[href*='/kamer-nijmegen/']"},
+            {"type": "text", "selector": ".price"}
+        ],
+        "wait_until": "networkidle"
+    },
+    {
+        "name": "nymveste",
+        "url": "https://nymveste.nl/studentenkamer-nijmegen-lingewaard",
+        "selector": ".woning-item, .listing, article",
+        "item_fields": [
+            {"type": "text", "selector": "h2, .title"},
+            {"type": "href", "selector": "a[href*='/woning/']"},
+            {"type": "text", "selector": ".price"}
+        ],
+        "wait_until": "networkidle"
+    },
+    {
+        "name": "kbsvastgoed",
+        "url": "https://kbsvastgoedbeheer.nl/huurwoningen/nijmegen/",
+        "selector": ".property-item, .woning, div[class*='listing']",
+        "item_fields": [
+            {"type": "text", "selector": ".title, h3"},
+            {"type": "href", "selector": "a[href*='/huurwoning/']"},
+            {"type": "text", "selector": ".price, .huur"}
+        ],
+        "wait_until": "networkidle"
+    },
+    {
+        "name": "guesthousenijmegen",
+        "url": "https://www.guesthousenijmegen.nl/rooms/",
+        "selector": ".room-card, .accommodation-item, article",
+        "item_fields": [
+            {"type": "text", "selector": "h2, .room-title"},
+            {"type": "href", "selector": "a[href*='/room/']"},
+            {"type": "text", "selector": ".price, .rate"}
         ],
         "wait_until": "networkidle"
     }
