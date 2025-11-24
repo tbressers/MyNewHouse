@@ -11,3 +11,4 @@ wheels/
 state/
 uv.lock
 .env
+cron.log

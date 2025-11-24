@@ -98,6 +98,7 @@ async def extract_items(page, site) -> List[Dict]:
     selector = site["selector"]
     elements = await page.query_selector_all(selector)
     items = []
+    base_url = page.url  # Get the current page URL for resolving relative links
 
     for el in elements:
         item = {}
@@ -117,7 +118,10 @@ async def extract_items(page, site) -> List[Dict]:
             elif t == "href":
                 href = await target.get_attribute("href")
                 if href:
-                    item[f"href:{sel}"] = href
+                    # Convert relative URLs to absolute URLs
+                    from urllib.parse import urljoin
+                    absolute_url = urljoin(base_url, href)
+                    item[f"href:{sel}"] = absolute_url
         if item:
             items.append(item)
 
@@ -129,7 +133,10 @@ async def extract_items(page, site) -> List[Dict]:
             txt = (await a.text_content()) or ""
             txt = " ".join(txt.split())
             if href and txt and "nijmegen" in (txt.lower() + (href.lower() if href else "")):
-                items.append({"href:any": href, "text:any": txt})
+                # Convert relative URLs to absolute URLs
+                from urllib.parse import urljoin
+                absolute_url = urljoin(base_url, href)
+                items.append({"href:any": absolute_url, "text:any": txt})
     return items
 
 async def check_site(browser, site) -> Dict:
@@ -154,6 +161,7 @@ async def check_site(browser, site) -> Dict:
 
     if has_change:
         save_state(site["name"], state_hash, items)
+        print(f"  {len(items)-len(last_items)} house(s) added!")
 
     # Een eenvoudige “diff” op basis van href-velden
     def hrefs(lst):
@@ -214,10 +222,10 @@ async def main():
             for link in r["new_links"]:
                 print(f"  {link}")
 
-        # Stuur Pushover notificatie met de nieuwe links
-        msg_lines = [f"Nieuw aanbod gedetecteerd op {len(changed_sites)} site(s):"]
+        # Stuur Pushover notificatie met de nieuwe links (full URLs)
+        msg_lines = []
         for r in changed_sites:
-            msg_lines.append(f"- {r['site']}: {len(r['new_links'])} nieuwe links")
+            msg_lines.append(f"\n{r['site']}: {len(r['new_links'])} nieuwe links")
             for link in r["new_links"]:
                 msg_lines.append(link)
         message = "\n".join(msg_lines)

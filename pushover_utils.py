@@ -85,8 +85,8 @@ def send_info_notification(info_message: str, context: str = "MyNewHouse Info") 
             "user": os.getenv('PUSHOVER_USER_KEY'),
             "message": f"{context}\n\n{info_message}",
             "title": "MyNewHouse Info",
-            "priority": -1,  # Low priority for info
-            "sound": None  # No sound for info messages
+            "priority": 0  # Medium priority for info
+#            "sound": None  # No sound for info messages
         }
 
         conn = http.client.HTTPSConnection("api.pushover.net:443")
