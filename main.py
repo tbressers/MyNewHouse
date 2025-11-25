@@ -202,7 +202,7 @@ async def check_site(browser, site) -> Dict:
 
     state_hash = compute_hash(items)
     last_hash, last_items = load_last_state(site["name"])
-    has_change = (state_hash != last_hash)
+    has_change = (state_hash != last_hash) and ((len(items)-len(last_items)) > 0)
 
     if has_change:
         save_state(site["name"], state_hash, items)
