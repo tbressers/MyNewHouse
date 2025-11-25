@@ -2,8 +2,6 @@ import http.client
 import urllib.parse
 import logging
 import os
-import sys
-from typing import Optional
 from dotenv import load_dotenv, find_dotenv
 
 logger = logging.getLogger(__name__)
@@ -13,7 +11,16 @@ load_dotenv(find_dotenv())
 logger.debug("Loaded .env: PUSHOVER_API_KEY present=%s, PUSHOVER_USER_KEY present=%s",
              bool(os.getenv("PUSHOVER_API_KEY")), bool(os.getenv("PUSHOVER_USER_KEY")))
 
-        
+# Global flag for dry-run mode
+_dry_run_mode = False
+
+def set_dry_run_mode(enabled: bool):
+    """Set the dry-run mode for all Pushover notifications"""
+    global _dry_run_mode
+    _dry_run_mode = enabled
+    if enabled:
+        logger.info("Pushover notifications: DRY-RUN mode enabled")
+
 def send_error_notification(error_message: str, context: str = "MyNewHouse Error") -> bool:
     """
     Send error notification via Pushover and log the error
@@ -24,10 +31,12 @@ def send_error_notification(error_message: str, context: str = "MyNewHouse Error
         
     Returns:
         bool: True if notification was sent successfully, False otherwise
-    """
-    # Always log the error first
-    print(f"{error_message}")        
-#    sys.exit(1)
+    """    
+    if _dry_run_mode:
+        logger.info(f"DRY-RUN: Would send error notification: {context}\n{error_message}")
+        return True
+    else:
+        logger.info(f"{context}\n{error_message}")
     
     try:
         # Prepare the message
@@ -51,21 +60,20 @@ def send_error_notification(error_message: str, context: str = "MyNewHouse Error
         
         if response.status == 200:
             logger.info("Pushover error notification sent successfully")
-            sys.exit(1)
+            return True
         else:
             logger.error(f"Failed to send Pushover notification: {response.status} - {response_data}")
+            return False
             
     except Exception as e:
         logger.error(f"Error sending Pushover notification: {e}")
-        sys.exit(1)
+        return False
     finally:
         try:
             if 'conn' in locals():
                 conn.close()
-            sys.exit(1) # Always exit after sending error notification
         except Exception:
-            logger.error(f"Connection close error")
-            sys.exit(1) # Always exit after error
+            logger.error("Connection close error")
 
 def send_info_notification(info_message: str, context: str = "MyNewHouse Info") -> bool:
     """
@@ -78,6 +86,11 @@ def send_info_notification(info_message: str, context: str = "MyNewHouse Info") 
     Returns:
         bool: True if notification was sent successfully, False otherwise
     """
+    logger.info(f"{context}: {info_message}")  # Log the info message
+
+    if _dry_run_mode:
+        logger.info(f"DRY-RUN: Would send info notification: {context}\n{info_message}")
+        return True
 
     try:
         message_data = {
@@ -86,7 +99,6 @@ def send_info_notification(info_message: str, context: str = "MyNewHouse Info") 
             "message": f"{context}\n\n{info_message}",
             "title": "MyNewHouse Info",
             "priority": 0  # Medium priority for info
-#            "sound": None  # No sound for info messages
         }
 
         conn = http.client.HTTPSConnection("api.pushover.net:443")

@@ -12,3 +12,4 @@ state/
 uv.lock
 .env
 cron.log
+*.log

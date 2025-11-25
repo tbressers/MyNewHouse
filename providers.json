@@ -1,0 +1,204 @@
+[
+  {
+    "name": "kamernet",
+    "url": "https://kamernet.nl/en/for-rent/student-housing-nijmegen",
+    "selector": "[data-testid='search-result-card'], [class*='SearchResultCard_root'], a[href*='/en/for-rent/room-'], a[href*='/en/for-rent/studio-'], a[href*='/en/for-rent/apartment-']",
+    "item_fields": [
+      {
+        "type": "text",
+        "selector": "h2, h3, .MuiTypography-subtitle1"
+      },
+      {
+        "type": "href",
+        "selector": "a[href*='/en/for-rent/room-'], a[href*='/en/for-rent/studio-'], a[href*='/en/for-rent/apartment-']"
+      }
+    ],
+    "wait_until": "domcontentloaded",
+    "preferred_method": "primary"
+  },
+  {
+    "name": "ssh&",
+    "url": "https://mijn.sshn.nl/nl-NL/",
+    "selector": "a[href*='/nl-NL/'], .property-item, .listing-item",
+    "item_fields": [
+      {
+        "type": "text",
+        "selector": "h2, h3, .property-title"
+      },
+      {
+        "type": "href",
+        "selector": "a"
+      },
+      {
+        "type": "text",
+        "selector": ".price, .property-price"
+      }
+    ],
+    "wait_until": "networkidle",
+    "preferred_method": "generic_anchor"
+  },
+  {
+    "name": "wibeco",
+    "url": "https://www.wibeco.nl/verhuur/studentenkamers-nijmegen/",
+    "selector": ".objecten .object, .woning-listing, .woning",
+    "item_fields": [
+      {
+        "type": "text",
+        "selector": ".object .title, .object h3, h2"
+      },
+      {
+        "type": "text",
+        "selector": ".object .price, .prijs"
+      }
+    ],
+    "wait_until": "networkidle",
+    "preferred_method": "generic_anchor"
+  },
+  {
+    "name": "nijmegen-studentenstad",
+    "url": "https://nijmegenstudentenstad.nl/kamers-in-nijmegen",
+    "selector": "a[href*='kamernet'], a[href*='huurzone'], a[href*='rentbird']",
+    "item_fields": [
+      {
+        "type": "href",
+        "selector": "a"
+      }
+    ],
+    "wait_until": "networkidle",
+    "preferred_method": "generic_anchor"
+  },
+  {
+    "name": "pararius",
+    "url": "https://www.pararius.nl/huurwoningen/nijmegen/studentenhuisvesting",
+    "selector": ".search-list__item, article, [data-testid='search-item']",
+    "item_fields": [
+      {
+        "type": "text",
+        "selector": ".search-list__item h2, h3 a"
+      },
+      {
+        "type": "href",
+        "selector": "a[href*='/kamer/']"
+      },
+      {
+        "type": "text",
+        "selector": ".search-list__item .price, .price"
+      }
+    ],
+    "wait_until": "networkidle",
+    "preferred_method": "generic_anchor"
+  },
+  {
+    "name": "kamernijmegen",
+    "url": "https://www.kamernijmegen.com/",
+    "selector": "a[href*='/kamer-nijmegen/']",
+    "item_fields": [
+      {
+        "type": "text",
+        "selector": "a"
+      },
+      {
+        "type": "href",
+        "selector": "a[href*='/kamer-nijmegen/']"
+      },
+      {
+        "type": "text",
+        "selector": ".price"
+      }
+    ],
+    "wait_until": "networkidle",
+    "preferred_method": "generic_anchor"
+  },
+  {
+    "name": "nymveste",
+    "url": "https://nymveste.nl/studentenkamer-nijmegen-lingewaard",
+    "selector": ".woning-item, .listing, article",
+    "item_fields": [
+      {
+        "type": "text",
+        "selector": "h2, .title"
+      },
+      {
+        "type": "href",
+        "selector": "a[href*='/woning/']"
+      },
+      {
+        "type": "text",
+        "selector": ".price"
+      }
+    ],
+    "wait_until": "networkidle",
+    "preferred_method": "generic_anchor"
+  },
+  {
+    "name": "kbsvastgoed",
+    "url": "https://kbsvastgoedbeheer.nl/aanbod/",
+    "selector": ".gb-grid-column.gb-query-loop-item",
+    "item_fields": [
+      {
+        "type": "text",
+        "selector": ".gb-headline-b45e4d00"
+      },
+      {
+        "type": "href",
+        "selector": "a.gb-container-ee26214d"
+      },
+      {
+        "type": "text",
+        "selector": ".gb-headline-11c9c2cc"
+      }
+    ],
+    "wait_until": "networkidle",
+    "preferred_method": "primary"
+  },
+  {
+    "name": "klikenhuur",
+    "url": "https://www.klikenhuur.nl/woning-overzicht?cityOrPostalcode=nijmegen&page=1&pagesize=12",
+    "selector": "a[href*='/listings/']",
+    "item_fields": [
+      {
+        "type": "text",
+        "selector": "h3"
+      },
+      {
+        "type": "text",
+        "selector": "h4"
+      },
+      {
+        "type": "href",
+        "selector": "a[href*='/listings/']"
+      },
+      {
+        "type": "text",
+        "selector": "p.no-margin"
+      },
+      {
+        "type": "text",
+        "selector": ".panel_body .text--s.mb1"
+      }
+    ],
+    "wait_until": "networkidle",
+    "preferred_method": "primary"
+  },
+  {
+    "name": "huurzone",
+    "url": "https://www.huurzone.nl/huurwoningen/nijmegen?utm_source=daisycon&utm_medium=affiliate&utm_campaign=daisycon_NijmegenStudentenstad.nl",
+    "selector": "div.search-results a[href*='/huurwoningen/gelderland/nijmegen/']",
+    "item_fields": [
+      {
+        "type": "text",
+        "selector": "h2"
+      },
+      {
+        "type": "href",
+        "selector": "a[href*='/huurwoningen/gelderland/nijmegen/']"
+      },
+      {
+        "type": "text",
+        "selector": "span.text-xl.font-bold"
+      }
+    ],
+    "wait_until": "networkidle",
+    "preferred_method": "generic_anchor"
+  }
+]
