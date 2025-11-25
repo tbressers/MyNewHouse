@@ -18,11 +18,12 @@ SITES = [
         "name": "kamernet",
         "url": "https://kamernet.nl/en/for-rent/student-housing-nijmegen",
         # CSS selector voor listing cards/titels (kan wijzigen; houd in de gaten)
-        "selector": "[data-testid='listing-card']",
-        # Hoe we een listing “samenvatten” (title + link)
+        # Updated: Kamernet uses .SearchResultCard_root class for listing cards
+        "selector": ".SearchResultCard_root__hSxn3, a[href*='/for-rent/room-'], a[href*='/for-rent/apartment-'], a[href*='/for-rent/studio-']",
+        # Hoe we een listing "samenvatten" (title + link)
         "item_fields": [
-            {"type": "text", "selector": "[data-testid='listing-card'] h2"},
-            {"type": "href", "selector": "a[href*='/for-rent/']"}
+            {"type": "text", "selector": ".MuiTypography-subtitle1, .SearchResultCard_contentRow__VZIJY"},
+            {"type": "href", "selector": "a"}
         ],
         "wait_until": "networkidle"
     },
