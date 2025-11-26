@@ -11,7 +11,7 @@ from typing import List, Dict, Tuple
 from logging.handlers import RotatingFileHandler
 
 from playwright.async_api import async_playwright
-from pushover_utils import send_info_notification, send_error_notification, set_dry_run_mode
+from pushover_utils import send_info_notification, set_dry_run_mode
 
 # Configure root logger to capture logs from all modules and write to file + console
 LOG_FILE = Path(__file__).resolve().parent / "app.log"
@@ -206,8 +206,7 @@ async def check_site(browser, site) -> Dict:
     try:
         items, used_method = await extract_items(page, site)
     except Exception as e:
-        err = f"Error checking {site['name']}: {e}"
-        send_error_notification(err, context=f"Error: {site['name']}")
+        logger.error(f"Error checking {site['name']}: {e}")
         return {"site": site["name"], "status": "error", "error": str(e), "items": [], "method": site.get("preferred_method","primary")}
     finally:
         await context.close()
@@ -271,9 +270,7 @@ async def main():
                         site["preferred_method"] = res["method"]
             await browser.close()
     except Exception as e:
-        err = f"Fatal runtime error: {e}"
-        send_error_notification(err, context="Runtime Error")
-        logger.error(err)
+        logger.error(f"Failed during site checks: {e}")
         return
 
     # Persist any preferred_method updates
@@ -287,9 +284,7 @@ async def main():
 
     if error_sites:
         err_lines = [f"{r['site']}: {r.get('error', 'unknown')}" for r in error_sites]
-        err_msg = "Errors during run:\n" + "\n".join(err_lines)
-        send_error_notification(err_msg, context="Check Site Errors")
-        logger.error(err_msg)
+        logger.error("Errors during run:\n" + "\n".join(err_lines))
 
     if changed_sites:
         for r in changed_sites:
@@ -302,6 +297,8 @@ async def main():
                 msg_lines.append(link)
         message = "\n".join(msg_lines)
         send_info_notification(message, context="New offers")
+    else:
+        logger.info("No new offers found.")
 
 # Add this entry point:
 if __name__ == "__main__":
