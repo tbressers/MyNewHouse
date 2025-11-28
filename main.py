@@ -14,7 +14,9 @@ from playwright.async_api import async_playwright
 from pushover_utils import send_info_notification, set_dry_run_mode
 
 # Configure root logger to capture logs from all modules and write to file + console
-LOG_FILE = Path(__file__).resolve().parent / "app.log"
+LOG_FILE = Path(__file__).resolve().parent / "logs/app.log"
+HOUSES_LOG_FILE = Path(__file__).resolve().parent / "logs/houses.json"
+
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
 
@@ -287,6 +289,28 @@ async def main():
         logger.error("Errors during run:\n" + "\n".join(err_lines))
 
     if changed_sites:
+        # Log new houses to JSON file
+        try:
+            HOUSES_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            houses_log = []
+            if HOUSES_LOG_FILE.exists():
+                with HOUSES_LOG_FILE.open("r", encoding="utf-8") as f:
+                    houses_log = json.load(f)
+            
+            timestamp = datetime.now(timezone.utc).isoformat()
+            for r in changed_sites:
+                for link in r["new_links"]:
+                    houses_log.append({
+                        "timestamp": timestamp,
+                        "site": r["site"],
+                        "link": link
+                    })
+            
+            with HOUSES_LOG_FILE.open("w", encoding="utf-8") as f:
+                json.dump(houses_log, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to update houses log: {e}")
+        
         for r in changed_sites:
             for link in r["new_links"]:
                 logger.info(f"  {link}")

@@ -13,3 +13,4 @@ uv.lock
 .env
 cron.log
 *.log
+logs/
