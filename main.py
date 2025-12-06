@@ -20,7 +20,6 @@ from pushover_utils import send_info_notification, set_dry_run_mode
 # Configure logging
 LOG_FILE = Path(__file__).resolve().parent / "logs/main_v2.log"
 HOUSES_LOG_FILE = Path(__file__).resolve().parent / "logs/houses.json"
-HTML_OUTPUT_DIR = Path(__file__).resolve().parent / "logs/html_dumps"
 
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
@@ -53,6 +52,50 @@ PROVIDER_URLS = [
     "https://www.huurzone.nl/huurwoningen/nijmegen?utm_source=daisycon&utm_medium=affiliate&utm_campaign=daisycon_NijmegenStudentenstad.nl"
 ]
 
+# Provider-specific configuration for filtering and extraction
+PROVIDER_CONFIG = {
+    "kamernet": {
+        "strict_filtering": True,        # High quality listings, keep strict
+        "wait_for_js": False,
+    },
+    "mijn": {
+        "strict_filtering": True,
+        "wait_for_js": False,
+    },
+    "wibeco": {
+        "strict_filtering": True,
+        "wait_for_js": False,
+    },
+    "nijmegenstudentenstad": {
+        "strict_filtering": False,       # Portal with minimal info, use relaxed
+        "wait_for_js": False,
+    },
+    "pararius": {
+        "strict_filtering": False,       # Client-side rendered, expect minimal text
+        "wait_for_js": True,             # Needs JS to render
+    },
+    "kamernijmegen": {
+        "strict_filtering": False,       # News/nav heavy, try relaxed filtering
+        "wait_for_js": False,
+    },
+    "nymveste": {
+        "strict_filtering": False,
+        "wait_for_js": False,
+    },
+    "kbsvastgoedbeheer": {
+        "strict_filtering": True,
+        "wait_for_js": False,
+    },
+    "klikenhuur": {
+        "strict_filtering": True,
+        "wait_for_js": False,
+    },
+    "huurzone": {
+        "strict_filtering": True,
+        "wait_for_js": False,
+    },
+}
+
 def get_provider_name(url: str) -> str:
     """Extract provider name from URL"""
     parsed = urlparse(url)
@@ -74,9 +117,16 @@ def load_existing_links() -> Set[str]:
         logger.error(f"Failed to load houses.json: {e}")
         return set()
 
-def is_property_listing(title: str, url: str) -> bool:
+def is_property_listing(title: str, url: str, strict: bool = True) -> bool:
     """
     Detect if a link is a real property listing using pure regex patterns.
+    
+    Args:
+        title: Link text/title to analyze
+        url: Link URL to analyze
+        strict: If True, requires all 3 patterns. If False, requires 2/3 patterns.
+                Strict mode filters out more false positives, relaxed catches more listings.
+    
     A listing must have:
     1. Dutch address pattern with street name and number somewhere in title
     2. Location indicators (city name or "te", "in", etc.)
@@ -91,16 +141,12 @@ def is_property_listing(title: str, url: str) -> bool:
     # Match: "StreetName 123", "StreetName 123-456", "StreetName 123 K5", etc.
     # Allow optional prefix like "New" before the street name
     street_pattern = r'(?:new\s+)?[A-Za-z][A-Za-z\s\.\-]*?\s+\d+(?:\s*[-A-Za-z0-9]*)?'
-    
-    if not re.search(street_pattern, title, re.IGNORECASE):
-        return False
+    has_street = bool(re.search(street_pattern, title, re.IGNORECASE))
     
     # Pattern 2: Location indicator - city name, "te", "in", "bij", etc.
     # This ensures we're looking at an address, not random digits in title
     location_pattern = r'\b(?:nijmegen|arnhem|wageningen|gennep|oss|te|in|bij|at|city|stad)\b'
-    
-    if not re.search(location_pattern, title, re.IGNORECASE):
-        return False
+    has_location = bool(re.search(location_pattern, title, re.IGNORECASE))
     
     # Pattern 3: Must have property-related content indicators
     property_indicators = [
@@ -111,11 +157,10 @@ def is_property_listing(title: str, url: str) -> bool:
         r'(?:furnished|unfurnished|gemeubileerd|ongemeubileerd)',  # Furnishing
         r'(?:beschikbaar|available|available from)',  # Availability
     ]
-    
     has_property_indicator = any(re.search(pattern, title, re.IGNORECASE) for pattern in property_indicators)
     
-    if not has_property_indicator:
-        return False
+    # Count how many patterns we matched
+    pattern_matches = sum([has_street, has_location, has_property_indicator])
     
     # Pattern 4: URL must NOT be pagination/filter/overview
     bad_url_patterns = [
@@ -128,12 +173,19 @@ def is_property_listing(title: str, url: str) -> bool:
     if any(re.search(pattern, url) for pattern in bad_url_patterns):
         return False
     
-    return True
+    # Require minimum patterns based on strict mode
+    required_patterns = 3 if strict else 2
+    
+    return pattern_matches >= required_patterns
 
-def filter_property_listings(links: List[Dict]) -> List[Dict]:
+def filter_property_listings(links: List[Dict], strict: bool = True) -> List[Dict]:
     """
     Filter links to only keep real property listings.
     Uses pure regex patterns without LLM or keyword exclusions.
+    
+    Args:
+        links: List of link dictionaries to filter
+        strict: If True, requires all 3 patterns. If False, requires 2/3 patterns.
     """
     if not links:
         return []
@@ -143,7 +195,7 @@ def filter_property_listings(links: List[Dict]) -> List[Dict]:
         title = link.get("title", "").strip()
         url = link.get("link", "").strip()
         
-        if is_property_listing(title, url):
+        if is_property_listing(title, url, strict=strict):
             filtered_links.append(link)
     
     logger.info(f"Filtered to {len(filtered_links)} property listings (from {len(links)} total links)")
@@ -200,17 +252,41 @@ def extract_listing_links(html: str, base_url: str) -> Dict[str, Dict]:
         logger.warning(f"Error parsing HTML: {e}")
         return {}
 
-async def scan_provider(browser, url: str, save_html: bool = False) -> tuple[str, List[Dict]]:
+async def scan_provider_with_retry(browser, url: str, max_retries: int = 2) -> tuple[str, List[Dict]]:
     """
-    Scan a provider URL and extract housing listing links.
-    Returns (provider_name, list_of_links_with_metadata)
+    Scan a provider URL with automatic retry on failure.
     
     Args:
         browser: Playwright browser instance
         url: Provider URL to scan
-        save_html: If True, save HTML source to file for verification
+        max_retries: Maximum number of retry attempts (default: 2)
+    
+    Returns:
+        Tuple of (provider_name, list_of_links)
     """
     provider_name = get_provider_name(url)
+    
+    for attempt in range(max_retries):
+        try:
+            return await scan_provider(browser, url)
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # 1s, then 2s
+                logger.warning(f"{provider_name} attempt {attempt+1}/{max_retries} failed, retrying in {wait_time}s: {e}")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"{provider_name}: failed after {max_retries} attempts: {e}")
+                return provider_name, []
+    
+    return provider_name, []
+
+async def scan_provider(browser, url: str) -> tuple[str, List[Dict]]:
+    """
+    Scan a provider URL and extract housing listing links.
+    Returns (provider_name, list_of_links_with_metadata)
+    """
+    provider_name = get_provider_name(url)
+    config = PROVIDER_CONFIG.get(provider_name, {"strict_filtering": True, "wait_for_js": False})
     logger.info(f"Scanning {provider_name}: {url}")
     
     context = await browser.new_context()
@@ -219,6 +295,17 @@ async def scan_provider(browser, url: str, save_html: bool = False) -> tuple[str
     try:
         await page.goto(url, wait_until="networkidle", timeout=30000)
         logger.info(f"{provider_name}: page loaded successfully")
+        
+        # Wait for dynamic content to render if configured
+        if config.get("wait_for_js"):
+            try:
+                # Give JavaScript time to execute
+                await asyncio.sleep(2)
+                await page.wait_for_load_state("networkidle", timeout=3000)
+                logger.debug(f"{provider_name}: waited for dynamic content")
+            except Exception:
+                logger.debug(f"{provider_name}: dynamic content load attempt completed")
+                pass
         
         # Try to dismiss consent dialogs
         for consent_sel in [
@@ -258,22 +345,64 @@ async def scan_provider(browser, url: str, save_html: bool = False) -> tuple[str
         html = await page.content()
         logger.info(f"{provider_name}: extracted HTML ({len(html)} bytes)")
         
-        # Save HTML to file if requested
-        if save_html:
-            HTML_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            html_file = HTML_OUTPUT_DIR / f"{provider_name}_{timestamp}.html"
-            with html_file.open("w", encoding="utf-8") as f:
-                f.write(html)
-            logger.info(f"{provider_name}: saved HTML to {html_file}")
-        
-        # Extract all links
+        # Extract all links from first page
         all_links = extract_listing_links(html, page.url)
-        logger.info(f"{provider_name}: found {len(all_links)} total links")
+        logger.info(f"{provider_name}: found {len(all_links)} total links on page 1")
         
-        # Filter links to property listings only
-        filtered_links = filter_property_listings(list(all_links.values()))
-        logger.info(f"{provider_name}: filtered to {len(filtered_links)} property listings")
+        # Try to follow pagination (up to 3 additional pages)
+        pagination_limit = 3
+        for page_num in range(2, pagination_limit + 2):
+            try:
+                # Look for next page link - try different patterns
+                next_link = None
+                selectors = [
+                    f"a:has-text('{page_num}')",
+                    f"a[href*='page={page_num}']",
+                    "a:has-text('Next')",
+                    "a[rel='next']",
+                ]
+                
+                for selector in selectors:
+                    next_link = await page.query_selector(selector)
+                    if next_link:
+                        break
+                
+                if not next_link:
+                    logger.debug(f"{provider_name}: no pagination link found for page {page_num}")
+                    break
+                
+                # Get the href and navigate
+                next_url = await next_link.evaluate("el => el.getAttribute('href')")
+                if not next_url:
+                    break
+                
+                # Resolve relative URLs
+                next_url = urljoin(page.url, next_url)
+                logger.debug(f"{provider_name}: following pagination to page {page_num}")
+                
+                await page.goto(next_url, wait_until="networkidle", timeout=15000)
+                await asyncio.sleep(0.5)
+                
+                # Extract links from this page
+                page_html = await page.content()
+                page_links = extract_listing_links(page_html, page.url)
+                logger.debug(f"{provider_name}: found {len(page_links)} links on page {page_num}")
+                
+                # Add to all_links (deduplicating by URL)
+                for link in page_links.values():
+                    if link["link"] not in all_links:
+                        all_links[link["link"]] = link
+                
+            except Exception as e:
+                logger.debug(f"{provider_name}: pagination stopped at page {page_num}: {e}")
+                break
+        
+        logger.info(f"{provider_name}: total {len(all_links)} links after pagination")
+        
+        # Filter links to property listings only, using provider-specific strict mode
+        strict_filtering = config.get("strict_filtering", True)
+        filtered_links = filter_property_listings(list(all_links.values()), strict=strict_filtering)
+        logger.info(f"{provider_name}: filtered to {len(filtered_links)} property listings (strict={strict_filtering})")
         
         return provider_name, filtered_links
         
@@ -289,7 +418,6 @@ async def main():
     parser.add_argument("--dry-run", action="store_true", help="Run without sending Pushover notifications")
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG logging")
     parser.add_argument("--provider", type=str, help="Scan only a specific provider (by name or URL)")
-    parser.add_argument("--save-html", action="store_true", help="Save HTML source files for verification")
     args = parser.parse_args()
     
     if args.debug:
@@ -299,9 +427,6 @@ async def main():
     if args.dry_run:
         set_dry_run_mode(True)
         logger.info("Running in DRY-RUN mode - no Pushover notifications will be sent")
-    
-    if args.save_html:
-        logger.info("HTML output mode enabled - will save HTML source files")
     
     # Load existing links
     existing_links = load_existing_links()
@@ -329,7 +454,7 @@ async def main():
             browser = await pw.chromium.launch(headless=True)
             
             for url in urls_to_scan:
-                provider_name, links = await scan_provider(browser, url, save_html=args.save_html)
+                provider_name, links = await scan_provider_with_retry(browser, url)
                 
                 # Deduplicate links from this provider
                 unique_links = {}
@@ -406,30 +531,27 @@ async def main():
         except Exception as e:
             logger.error(f"Failed to update houses.json: {e}")
     
-    # Send notification (skip if in HTML output mode)
-    if not args.save_html:
-        message_parts = []
-        total_new = 0
-        
-        for provider_name in sorted(provider_results.keys()):
-            res = provider_results[provider_name]
-            if res["new"] > 0:
-                total_new += res["new"]
-                message_parts.append(f"\n{provider_name}: {res['new']} new listings")
-                for link_data in res["new_links"]:  # Show max 3 per provider
-                    title = link_data.get("title", "No title")[:60]
-                    message_parts.append(f"  • {title}")
-                if res["new"] > 3:
-                    message_parts.append(f"  ... and {res['new'] - 3} more")
-        
-        if message_parts:
-            message = "\n".join(message_parts)
-            logger.info(f"Found {total_new} new listings total")
-            send_info_notification(message, context="New house offers")
-        else:
-            logger.info("No new listings found")
+    # Send notification
+    message_parts = []
+    total_new = 0
+    
+    for provider_name in sorted(provider_results.keys()):
+        res = provider_results[provider_name]
+        if res["new"] > 0:
+            total_new += res["new"]
+            message_parts.append(f"\n{provider_name}: {res['new']} new listings")
+            for link_data in res["new_links"]:  # Show max 3 per provider
+                title = link_data.get("title", "No title")[:60]
+                message_parts.append(f"  • {title}")
+            if res["new"] > 3:
+                message_parts.append(f"  ... and {res['new'] - 3} more")
+    
+    if message_parts:
+        message = "\n".join(message_parts)
+        logger.info(f"Found {total_new} new listings total")
+        send_info_notification(message, context="New house offers")
     else:
-        logger.info("HTML output mode - skipping Pushover notification")
+        logger.info("No new listings found")
 
 if __name__ == "__main__":
     asyncio.run(main())
