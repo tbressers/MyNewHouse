@@ -585,7 +585,8 @@ async def main():
             message_parts.append(f"\n{provider_name}: {res['new']} new listings")
             for link_data in res["new_links"]:  # Show max 3 per provider
                 title = link_data.get("title", "No title")[:60]
-                message_parts.append(f"  • {title}")
+                link = link_data.get("link", "")
+                message_parts.append(f"  • {title}\n    {link}")
             if res["new"] > 3:
                 message_parts.append(f"  ... and {res['new'] - 3} more")
     

@@ -2,6 +2,7 @@ import http.client
 import urllib.parse
 import logging
 import os
+import re
 from dotenv import load_dotenv, find_dotenv
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,52 @@ def set_dry_run_mode(enabled: bool):
     if enabled:
         logger.info("Pushover notifications: DRY-RUN mode enabled")
 
+def _split_message(message: str, max_length: int = 512, max_chunks: int = 5) -> list[str]:
+    """
+    Split message into chunks of max_length, preferring to split after URLs.
+    Maximum of max_chunks messages will be created; text beyond that is truncated.
+    
+    Args:
+        message: The message to split
+        max_length: Maximum length per chunk (default 512 for Pushover)
+        max_chunks: Maximum number of chunks to create (default 5)
+        
+    Returns:
+        list: List of message chunks (maximum max_chunks items)
+    """
+    if len(message) <= max_length:
+        return [message]
+    
+    chunks = []
+    remaining = message
+    
+    while remaining and len(chunks) < max_chunks:
+        if len(remaining) <= max_length:
+            chunks.append(remaining)
+            break
+        
+        # Find the last URL in the first max_length characters
+        chunk = remaining[:max_length]
+        url_pattern = r'https?://\S+'
+        urls_in_chunk = list(re.finditer(url_pattern, chunk))
+        
+        if urls_in_chunk:
+            # Split right after the last URL
+            last_url = urls_in_chunk[-1]
+            split_pos = last_url.end()
+            chunks.append(remaining[:split_pos])
+            remaining = remaining[split_pos:].lstrip()
+        else:
+            # No URL found, split at max_length at word boundary if possible
+            split_pos = max_length
+            last_space = chunk.rfind(' ')
+            if last_space > max_length * 0.7:  # Only use space if it's reasonably close
+                split_pos = last_space + 1
+            chunks.append(remaining[:split_pos])
+            remaining = remaining[split_pos:].lstrip()
+    
+    return chunks
+
 def send_error_notification(error_message: str, context: str = "MyNewHouse Error") -> bool:
     """
     Send error notification via Pushover and log the error
@@ -39,31 +86,38 @@ def send_error_notification(error_message: str, context: str = "MyNewHouse Error
         logger.info(f"{context}\n{error_message}")
     
     try:
-        # Prepare the message
-        message_data = {
-            "token": os.getenv('PUSHOVER_API_KEY'),
-            "user": os.getenv('PUSHOVER_USER_KEY'),
-            "message": f"{context}\n\n{error_message}",
-            "title": "MyNewHouse Error",
-            "priority": 1,  # High priority for errors
-            "sound": "siren"  # Alert sound for errors
-        }
+        # Split message if needed
+        full_message = f"{context}\n\n{error_message}"
+        message_chunks = _split_message(full_message)
         
-        # Send the notification
-        conn = http.client.HTTPSConnection("api.pushover.net:443")
-        conn.request("POST", "/1/messages.json",
-                    urllib.parse.urlencode(message_data),
-                    {"Content-type": "application/x-www-form-urlencoded"})
-        
-        response = conn.getresponse()
-        response_data = response.read().decode()
-        
-        if response.status == 200:
-            logger.info("Pushover error notification sent successfully")
-            return True
-        else:
-            logger.error(f"Failed to send Pushover notification: {response.status} - {response_data}")
-            return False
+        all_sent = True
+        for i, chunk in enumerate(message_chunks):
+            # Prepare the message
+            message_data = {
+                "token": os.getenv('PUSHOVER_API_KEY'),
+                "user": os.getenv('PUSHOVER_USER_KEY'),
+                "message": chunk,
+                "title": "MyNewHouse Error" + (f" (Part {i+1}/{len(message_chunks)})" if len(message_chunks) > 1 else ""),
+                "priority": 1,  # High priority for errors
+                "sound": "siren"  # Alert sound for errors
+            }
+            
+            # Send the notification
+            conn = http.client.HTTPSConnection("api.pushover.net:443")
+            conn.request("POST", "/1/messages.json",
+                        urllib.parse.urlencode(message_data),
+                        {"Content-type": "application/x-www-form-urlencoded"})
+            
+            response = conn.getresponse()
+            response_data = response.read().decode()
+            
+            if response.status == 200:
+                logger.info(f"Pushover error notification sent successfully (part {i+1}/{len(message_chunks)})")
+            else:
+                logger.error(f"Failed to send Pushover notification: {response.status} - {response_data}")
+                all_sent = False
+                
+        return all_sent
             
     except Exception as e:
         logger.error(f"Error sending Pushover notification: {e}")
@@ -93,28 +147,35 @@ def send_info_notification(info_message: str, context: str = "MyNewHouse Info") 
         return True
 
     try:
-        message_data = {
-            "token": os.getenv('PUSHOVER_API_KEY'),
-            "user": os.getenv('PUSHOVER_USER_KEY'),
-            "message": f"{context}\n\n{info_message}",
-            "title": "MyNewHouse Info",
-            "priority": 0  # Medium priority for info
-        }
+        # Split message if needed
+        full_message = f"{context}\n\n{info_message}"
+        message_chunks = _split_message(full_message)
+        
+        all_sent = True
+        for i, chunk in enumerate(message_chunks):
+            message_data = {
+                "token": os.getenv('PUSHOVER_API_KEY'),
+                "user": os.getenv('PUSHOVER_USER_KEY'),
+                "message": chunk,
+                "title": "MyNewHouse Info" + (f" (Part {i+1}/{len(message_chunks)})" if len(message_chunks) > 1 else ""),
+                "priority": 0  # Medium priority for info
+            }
 
-        conn = http.client.HTTPSConnection("api.pushover.net:443")
-        conn.request("POST", "/1/messages.json",
-                     urllib.parse.urlencode(message_data),
-                     {"Content-type": "application/x-www-form-urlencoded"})
+            conn = http.client.HTTPSConnection("api.pushover.net:443")
+            conn.request("POST", "/1/messages.json",
+                         urllib.parse.urlencode(message_data),
+                         {"Content-type": "application/x-www-form-urlencoded"})
 
-        response = conn.getresponse()
-        response_data = response.read().decode()
+            response = conn.getresponse()
+            response_data = response.read().decode()
 
-        if response.status == 200:
-            logger.info("Pushover info notification sent successfully")
-            return True
-        else:
-            logger.error(f"Failed to send Pushover info notification: {response.status} - {response_data}")
-            return False
+            if response.status == 200:
+                logger.info(f"Pushover info notification sent successfully (part {i+1}/{len(message_chunks)})")
+            else:
+                logger.error(f"Failed to send Pushover info notification: {response.status} - {response_data}")
+                all_sent = False
+
+        return all_sent
 
     except Exception as e:
         logger.error(f"Error sending Pushover info notification: {e}")
