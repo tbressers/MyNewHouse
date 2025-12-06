@@ -1,329 +1,435 @@
 #!/usr/bin/env python3
+"""
+Simplified house scraper v2: Scan provider URLs, extract all links, compare with houses.json
+Uses pure regex patterns to detect property listings.
+"""
+
 import asyncio
 import json
-import os
-import hashlib
 import logging
 import argparse
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict, Set
 from logging.handlers import RotatingFileHandler
+from urllib.parse import urljoin, urlparse
 
 from playwright.async_api import async_playwright
 from pushover_utils import send_info_notification, set_dry_run_mode
 
-# Configure root logger to capture logs from all modules and write to file + console
-LOG_FILE = Path(__file__).resolve().parent / "logs/app.log"
+# Configure logging
+LOG_FILE = Path(__file__).resolve().parent / "logs/main_v2.log"
 HOUSES_LOG_FILE = Path(__file__).resolve().parent / "logs/houses.json"
+HTML_OUTPUT_DIR = Path(__file__).resolve().parent / "logs/html_dumps"
 
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
 
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(name)s - %(message)s')
 
-file_handler = RotatingFileHandler(LOG_FILE, maxBytes=1_000_000_000, backupCount=5, encoding="utf-8")  # 1GB max
+file_handler = RotatingFileHandler(LOG_FILE, maxBytes=1_000_000_000, backupCount=5, encoding="utf-8")
 file_handler.setFormatter(formatter)
 
-console_handler = logging.StreamHandler()  # outputs to stderr
+console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 
-# Ensure a clean handler set (avoid duplicates on re-run)
 root_logger.handlers.clear()
 root_logger.addHandler(file_handler)
 root_logger.addHandler(console_handler)
 
 logger = logging.getLogger(__name__)
 
-STATE_DIR = Path(os.getenv("STATE_DIR", "./state"))
-STATE_DIR.mkdir(parents=True, exist_ok=True)
+# Provider URLs to scan
+PROVIDER_URLS = [
+    "https://kamernet.nl/en/for-rent/student-housing-nijmegen",
+    "https://mijn.sshn.nl/nl-NL/",
+    "https://www.wibeco.nl/verhuur/studentenkamers-nijmegen/",
+    "https://nijmegenstudentenstad.nl/kamers-in-nijmegen",
+    "https://www.pararius.nl/huurwoningen/nijmegen/studentenhuisvesting",
+    "https://www.kamernijmegen.com/",
+    "https://nymveste.nl/studentenkamer-nijmegen-lingewaard",
+    "https://kbsvastgoedbeheer.nl/aanbod/",
+    "https://www.klikenhuur.nl/woning-overzicht?cityOrPostalcode=nijmegen&page=1&pagesize=12",
+    "https://www.huurzone.nl/huurwoningen/nijmegen?utm_source=daisycon&utm_medium=affiliate&utm_campaign=daisycon_NijmegenStudentenstad.nl"
+]
 
-PROVIDERS_FILE = Path(__file__).resolve().parent / "providers.json"
+def get_provider_name(url: str) -> str:
+    """Extract provider name from URL"""
+    parsed = urlparse(url)
+    domain = parsed.netloc.replace("www.", "").split(".")[0]
+    return domain
 
-# REMOVE static SITES; now loaded from JSON
-def load_providers() -> List[Dict]:
-    with PROVIDERS_FILE.open("r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_providers(providers: List[Dict]):
-    # Persist updated preferred_method values
-    with PROVIDERS_FILE.open("w", encoding="utf-8") as f:
-        json.dump(providers, f, ensure_ascii=False, indent=2)
-
-def compute_hash(items: List[Dict]) -> str:
-    # Sorteer deterministisch en hash als state-handtekening
-    normalized = json.dumps(sorted(items, key=lambda x: json.dumps(x, sort_keys=True)), ensure_ascii=False)
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-
-def load_last_state(site_name: str) -> Tuple[str, List[Dict]]:
-    state_file = STATE_DIR / f"{site_name}.json"
-    if state_file.exists():
-        try:
-            data = json.load(state_file.open("r", encoding="utf-8"))
-            return data.get("hash", ""), data.get("items", [])
-        except Exception:
-            return "", []
-    return "", []
-
-def save_state(site_name: str, state_hash: str, items: List[Dict]):
-    state_file = STATE_DIR / f"{site_name}.json"
-    # Use timezone-aware UTC timestamps to avoid deprecation warnings in Python 3.12+
-    json.dump({"hash": state_hash, "items": items, "ts": datetime.now(timezone.utc).isoformat()}, state_file.open("w", encoding="utf-8"), ensure_ascii=False, indent=2)
-
-async def perform_common_preparation(page, site):
-    logger.info(f"Navigating {site['name']} -> {site['url']}")
-    await page.goto(site["url"], wait_until=site.get("wait_until", "domcontentloaded"))
-    # Consent dismissal
-    for consent_sel in [
-        "button:has-text('Accept')",
-        "button:has-text('Akkoord')",
-        "button:has-text('Alles accepteren')",
-        "button:has-text('Allow')"
-    ]:
-        try:
-            btn = await page.query_selector(consent_sel)
-            if btn:
-                await btn.click()
-                logger.debug(f"{site['name']}: clicked consent button {consent_sel}")
-                await asyncio.sleep(0.4)
-                break
-        except Exception:
-            pass
-    # Progressive scrolling
-    last_height = 0
-    for _ in range(12):
-        await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
-        await asyncio.sleep(0.5)
-        height = await page.evaluate("document.body.scrollHeight")
-        if height == last_height:
-            break
-        last_height = height
-
-async def method_primary(page, site) -> List[Dict]:
-    selector = site["selector"]
+def load_existing_links() -> Set[str]:
+    """Load all existing house links from houses.json"""
+    if not HOUSES_LOG_FILE.exists():
+        return set()
+    
     try:
-        await page.wait_for_selector(selector, timeout=8000)
-    except Exception:
-        logger.warning(f"{site['name']}: primary selector timeout: {selector}")
-    elements = await page.query_selector_all(selector)
-    items = []
-    base_url = page.url
-    for el in elements:
-        item = {}
-        for field in site["item_fields"]:
-            sel = field["selector"]
-            t = field["type"]
-            if t == "text":
-                target = await el.query_selector(sel)
-                if target:
-                    txt = (await target.text_content()) or ""
-                    txt = " ".join(txt.split())
-                    if txt:
-                        item[f"text:{sel}"] = txt
-            elif t == "href":
-                anchors = await el.query_selector_all(sel)
-                for a in anchors:
-                    href = await a.get_attribute("href")
-                    if href:
-                        from urllib.parse import urljoin
-                        item[f"href:{href}"] = urljoin(base_url, href)
-        if item:
-            items.append(item)
-    logger.info(f"{site['name']}: primary extracted {len(items)} items")
-    return items
+        with HOUSES_LOG_FILE.open("r", encoding="utf-8") as f:
+            houses = json.load(f)
+        links = {h.get("link") for h in houses if h.get("link")}
+        logger.info(f"Loaded {len(links)} existing links from houses.json")
+        return links
+    except Exception as e:
+        logger.error(f"Failed to load houses.json: {e}")
+        return set()
 
-async def method_broad_anchor(page, site) -> List[Dict]:
-    # Only meaningful for kamernet; for others return empty
-    if site["name"] != "kamernet":
+def is_property_listing(title: str, url: str) -> bool:
+    """
+    Detect if a link is a real property listing using pure regex patterns.
+    A listing must have:
+    1. Dutch address pattern with street name and number somewhere in title
+    2. Location indicators (city name or "te", "in", etc.)
+    3. Property indicators (size m², price €, property type)
+    """
+    import re
+    
+    title = title.strip()
+    url = url.lower()
+    
+    # Pattern 1: Dutch address anywhere in title
+    # Match: "StreetName 123", "StreetName 123-456", "StreetName 123 K5", etc.
+    # Allow optional prefix like "New" before the street name
+    street_pattern = r'(?:new\s+)?[A-Za-z][A-Za-z\s\.\-]*?\s+\d+(?:\s*[-A-Za-z0-9]*)?'
+    
+    if not re.search(street_pattern, title, re.IGNORECASE):
+        return False
+    
+    # Pattern 2: Location indicator - city name, "te", "in", "bij", etc.
+    # This ensures we're looking at an address, not random digits in title
+    location_pattern = r'\b(?:nijmegen|arnhem|wageningen|gennep|oss|te|in|bij|at|city|stad)\b'
+    
+    if not re.search(location_pattern, title, re.IGNORECASE):
+        return False
+    
+    # Pattern 3: Must have property-related content indicators
+    property_indicators = [
+        r'\d+\s*m²',                          # Size: "42 m²"
+        r'€\s*[\d,\.]+',                      # Price: "€ 1200" or "€1,200.50"
+        r'\d+\s*(?:/maand|/month|per maand|per month)', # Price per month
+        r'\b(?:room|kamer|studio|apartment|appartement|woning|huis|house|flat|unit)\b',  # Property types
+        r'(?:furnished|unfurnished|gemeubileerd|ongemeubileerd)',  # Furnishing
+        r'(?:beschikbaar|available|available from)',  # Availability
+    ]
+    
+    has_property_indicator = any(re.search(pattern, title, re.IGNORECASE) for pattern in property_indicators)
+    
+    if not has_property_indicator:
+        return False
+    
+    # Pattern 4: URL must NOT be pagination/filter/overview
+    bad_url_patterns = [
+        r'[\?&]page=',           # Pagination: ?page=2
+        r'[\?&]start=',          # Pagination: ?start=20
+        r'-overzicht(?:\?|/|$)',  # Overview pages
+        r'/(?:en|nl)/(?:for-rent|huurwoningen)\s*$',  # Just category, no specific property
+    ]
+    
+    if any(re.search(pattern, url) for pattern in bad_url_patterns):
+        return False
+    
+    return True
+
+def filter_property_listings(links: List[Dict]) -> List[Dict]:
+    """
+    Filter links to only keep real property listings.
+    Uses pure regex patterns without LLM or keyword exclusions.
+    """
+    if not links:
         return []
-    base_url = page.url
-    anchors = await page.query_selector_all("a[href*='/en/for-rent/'], a[href*='/kamer/'], a[href*='/room/']")
-    items = []
-    for a in anchors:
-        href = await a.get_attribute("href")
-        txt = (await a.text_content()) or ""
-        txt = " ".join(txt.split())
-        if href and txt and len(txt) > 3:
-            from urllib.parse import urljoin
-            items.append({"text:any": txt, f"href:{href}": urljoin(base_url, href)})
-    logger.info(f"{site['name']}: broad_anchor extracted {len(items)} items")
-    return items
+    
+    filtered_links = []
+    for link in links:
+        title = link.get("title", "").strip()
+        url = link.get("link", "").strip()
+        
+        if is_property_listing(title, url):
+            filtered_links.append(link)
+    
+    logger.info(f"Filtered to {len(filtered_links)} property listings (from {len(links)} total links)")
+    return filtered_links
 
-async def method_generic_anchor(page, site) -> List[Dict]:
-    base_url = page.url
-    anchors = await page.query_selector_all("a[href]")
-    items = []
-    for a in anchors:
-        href = await a.get_attribute("href")
-        txt = (await a.text_content()) or ""
-        txt = " ".join(txt.split())
-        if href and txt and "nijmegen" in (txt.lower() + href.lower()):
-            from urllib.parse import urljoin
-            items.append({"href:any": urljoin(base_url, href), "text:any": txt})
-    logger.info(f"{site['name']}: generic_anchor extracted {len(items)} items")
-    return items
+def extract_listing_links(html: str, base_url: str) -> Dict[str, Dict]:
+    """
+    Extract all links from HTML.
+    Returns dict mapping link -> {title, price, date} where available.
+    """
+    from html.parser import HTMLParser
+    
+    links_data = {}
+    
+    class LinkExtractor(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.current_text = []
+            self.listing_data = {}
+        
+        def handle_starttag(self, tag, attrs):
+            attrs_dict = dict(attrs)
+            if tag == "a" and "href" in attrs_dict:
+                href = attrs_dict["href"]
+                if href and not href.startswith("javascript"):
+                    full_url = urljoin(base_url, href)
+                    self.current_text = []
+                    self.listing_data = {"link": full_url}
+        
+        def handle_data(self, data):
+            text = data.strip()
+            if text and len(text) > 0:
+                self.current_text.append(text)
+        
+        def handle_endtag(self, tag):
+            if tag == "a" and self.listing_data.get("link"):
+                title = " ".join(self.current_text)
+                # Normalize title (remove extra spaces)
+                title = " ".join(title.split())
+                
+                # Keep all links, let LLM decide
+                if title:  # Only if there's some text
+                    self.listing_data["title"] = title
+                    links_data[self.listing_data["link"]] = self.listing_data
+                
+                self.listing_data = {}
+                self.current_text = []
+    
+    try:
+        parser = LinkExtractor()
+        parser.feed(html)
+        return links_data
+    except Exception as e:
+        logger.warning(f"Error parsing HTML: {e}")
+        return {}
 
-METHOD_SEQUENCE = ["primary", "broad_anchor", "generic_anchor"]
-
-async def extract_items(page, site) -> Tuple[List[Dict], str]:
-    await perform_common_preparation(page, site)
-    preferred = site.get("preferred_method", "primary")
-    logger.debug(f"{site['name']}: preferred_method={preferred}")
-
-    async def run(method_name):
-        if method_name == "primary":
-            return await method_primary(page, site)
-        if method_name == "broad_anchor":
-            return await method_broad_anchor(page, site)
-        if method_name == "generic_anchor":
-            return await method_generic_anchor(page, site)
-        return []
-
-    # First try preferred
-    if preferred in METHOD_SEQUENCE:
-        items = await run(preferred)
-        if items:
-            return items, preferred
-
-    # Preferred failed; try full sequence
-    for m in METHOD_SEQUENCE:
-        if m == preferred:
-            continue
-        items = await run(m)
-        if items:
-            logger.info(f"{site['name']}: switching preferred_method -> {m}")
-            return items, m
-
-    # All failed
-    if site["name"] == "kamernet":
-        # Debug snippet
-        html_snip = await page.evaluate("document.querySelector('body').innerHTML.slice(0, 2000)")
-        logger.debug(f"kamernet: debug HTML snippet (truncated 2000): {html_snip}")
-    logger.error(f"{site['name']}: all methods failed")
-    return [], preferred
-
-async def check_site(browser, site) -> Dict:
+async def scan_provider(browser, url: str, save_html: bool = False) -> tuple[str, List[Dict]]:
+    """
+    Scan a provider URL and extract housing listing links.
+    Returns (provider_name, list_of_links_with_metadata)
+    
+    Args:
+        browser: Playwright browser instance
+        url: Provider URL to scan
+        save_html: If True, save HTML source to file for verification
+    """
+    provider_name = get_provider_name(url)
+    logger.info(f"Scanning {provider_name}: {url}")
+    
     context = await browser.new_context()
     page = await context.new_page()
+    
     try:
-        items, used_method = await extract_items(page, site)
+        await page.goto(url, wait_until="networkidle", timeout=30000)
+        logger.info(f"{provider_name}: page loaded successfully")
+        
+        # Try to dismiss consent dialogs
+        for consent_sel in [
+            "button:has-text('Accept')",
+            "button:has-text('Akkoord')",
+            "button:has-text('Alles accepteren')",
+            "button:has-text('Allow')"
+        ]:
+            try:
+                btn = await page.query_selector(consent_sel)
+                if btn:
+                    await btn.click()
+                    await asyncio.sleep(0.5)
+                    logger.debug(f"{provider_name}: dismissed consent dialog")
+                    break
+            except Exception:
+                pass
+        
+        # Progressive scrolling to load more content
+        last_height = 0
+        scroll_count = 0
+        max_scrolls = 20
+        
+        while scroll_count < max_scrolls:
+            await page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+            await asyncio.sleep(0.3)
+            height = await page.evaluate("document.body.scrollHeight")
+            
+            if height == last_height:
+                logger.debug(f"{provider_name}: reached end of page after {scroll_count} scrolls")
+                break
+            
+            last_height = height
+            scroll_count += 1
+        
+        # Get full HTML
+        html = await page.content()
+        logger.info(f"{provider_name}: extracted HTML ({len(html)} bytes)")
+        
+        # Save HTML to file if requested
+        if save_html:
+            HTML_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            html_file = HTML_OUTPUT_DIR / f"{provider_name}_{timestamp}.html"
+            with html_file.open("w", encoding="utf-8") as f:
+                f.write(html)
+            logger.info(f"{provider_name}: saved HTML to {html_file}")
+        
+        # Extract all links
+        all_links = extract_listing_links(html, page.url)
+        logger.info(f"{provider_name}: found {len(all_links)} total links")
+        
+        # Filter links to property listings only
+        filtered_links = filter_property_listings(list(all_links.values()))
+        logger.info(f"{provider_name}: filtered to {len(filtered_links)} property listings")
+        
+        return provider_name, filtered_links
+        
     except Exception as e:
-        logger.error(f"Error checking {site['name']}: {e}")
-        return {"site": site["name"], "status": "error", "error": str(e), "items": [], "method": site.get("preferred_method","primary")}
+        logger.error(f"Error scanning {provider_name}: {e}")
+        return provider_name, []
+    
     finally:
         await context.close()
 
-    state_hash = compute_hash(items)
-    last_hash, last_items = load_last_state(site["name"])
-    has_change = (state_hash != last_hash) and ((len(items)-len(last_items)) > 0)
-
-    if has_change and items:
-        save_state(site["name"], state_hash, items)
-
-    def hrefs(lst):
-        hs = set()
-        for it in lst:
-            for k, v in it.items():
-                if k.startswith("href:") or k == "href:any":
-                    hs.add(v)
-        return hs
-
-    new_links = list(hrefs(items) - hrefs(last_items))
-
-    return {
-        "site": site["name"],
-        "status": "ok",
-        "count": len(items),
-        "changed": has_change,
-        "new_links": new_links[:10],
-        "method": used_method
-    }
-
 async def main():
-    parser = argparse.ArgumentParser(description="Check housing websites for new listings")
+    parser = argparse.ArgumentParser(description="Scan housing providers for new listings (v2)")
     parser.add_argument("--dry-run", action="store_true", help="Run without sending Pushover notifications")
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG logging")
+    parser.add_argument("--provider", type=str, help="Scan only a specific provider (by name or URL)")
+    parser.add_argument("--save-html", action="store_true", help="Save HTML source files for verification")
     args = parser.parse_args()
-
+    
     if args.debug:
         root_logger.setLevel(logging.DEBUG)
         logger.debug("Debug logging enabled")
-
+    
     if args.dry_run:
         set_dry_run_mode(True)
         logger.info("Running in DRY-RUN mode - no Pushover notifications will be sent")
-
-    try:
-        providers = load_providers()
-    except Exception as e:
-        logger.error(f"Failed to load providers.json: {e}")
-        return
-
+    
+    if args.save_html:
+        logger.info("HTML output mode enabled - will save HTML source files")
+    
+    # Load existing links
+    existing_links = load_existing_links()
+    logger.info(f"Starting scan with {len(existing_links)} known links")
+    
+    # Filter providers if specific one requested
+    urls_to_scan = PROVIDER_URLS
+    if args.provider:
+        provider_filter = args.provider.lower()
+        urls_to_scan = [
+            url for url in PROVIDER_URLS 
+            if provider_filter in url.lower() or provider_filter == get_provider_name(url)
+        ]
+        if not urls_to_scan:
+            logger.error(f"No providers matched filter: {args.provider}")
+            return
+        logger.info(f"Scanning {len(urls_to_scan)} provider(s) matching '{args.provider}'")
+    
+    # Scan all providers
+    all_new_links = []
+    provider_results = {}
+    
     try:
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True)
-            results = []
-            for site in providers:
-                res = await check_site(browser, site)
-                results.append(res)
-                # Update preferred_method if success and method differs
-                if res["status"] == "ok" and res["count"] > 0:
-                    if site.get("preferred_method") != res["method"]:
-                        site["preferred_method"] = res["method"]
+            
+            for url in urls_to_scan:
+                provider_name, links = await scan_provider(browser, url, save_html=args.save_html)
+                
+                # Deduplicate links from this provider
+                unique_links = {}
+                for link_data in links:
+                    link_url = link_data.get("link")
+                    if link_url and link_url not in unique_links:
+                        unique_links[link_url] = link_data
+                
+                # Find new links
+                new_links = [
+                    link for link in unique_links.values()
+                    if link.get("link") and link["link"] not in existing_links
+                ]
+                
+                provider_results[provider_name] = {
+                    "total": len(unique_links),
+                    "new": len(new_links),
+                    "new_links": new_links
+                }
+                
+                logger.info(f"{provider_name}: {len(new_links)} new listings found (out of {len(unique_links)} total)")
+                all_new_links.extend(new_links)
+            
             await browser.close()
+    
     except Exception as e:
-        logger.error(f"Failed during site checks: {e}")
+        logger.error(f"Fatal error during scan: {e}")
         return
-
-    # Persist any preferred_method updates
-    try:
-        save_providers(providers)
-    except Exception as e:
-        logger.error(f"Failed saving providers.json: {e}")
-
-    changed_sites = [r for r in results if r.get("changed")]
-    error_sites = [r for r in results if r.get("status") == "error"]
-
-    if error_sites:
-        err_lines = [f"{r['site']}: {r.get('error', 'unknown')}" for r in error_sites]
-        logger.error("Errors during run:\n" + "\n".join(err_lines))
-
-    if changed_sites:
-        # Log new houses to JSON file
+    
+    # Deduplicate all new links globally
+    unique_new_links = {}
+    for link_data in all_new_links:
+        link_url = link_data.get("link")
+        if link_url and link_url not in unique_new_links:
+            unique_new_links[link_url] = link_data
+    
+    all_new_links = list(unique_new_links.values())
+    
+    # Save new links to houses.json
+    if all_new_links:
         try:
             HOUSES_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
             houses_log = []
+            
             if HOUSES_LOG_FILE.exists():
                 with HOUSES_LOG_FILE.open("r", encoding="utf-8") as f:
                     houses_log = json.load(f)
             
             timestamp = datetime.now(timezone.utc).isoformat()
-            for r in changed_sites:
-                for link in r["new_links"]:
-                    houses_log.append({
-                        "timestamp": timestamp,
-                        "site": r["site"],
-                        "link": link
-                    })
+            
+            # Add new links
+            for link_data in all_new_links:
+                # Find which provider this link came from
+                provider_name = "unknown"
+                for name, res in provider_results.items():
+                    if link_data in res["new_links"]:
+                        provider_name = name
+                        break
+                
+                houses_log.append({
+                    "timestamp": timestamp,
+                    "site": provider_name,
+                    "link": link_data.get("link", ""),
+                    "title": link_data.get("title", ""),
+                    "price": link_data.get("price", ""),
+                    "date": link_data.get("date", "")
+                })
             
             with HOUSES_LOG_FILE.open("w", encoding="utf-8") as f:
                 json.dump(houses_log, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to update houses log: {e}")
+            
+            logger.info(f"Saved {len(all_new_links)} new links to houses.json")
         
-        for r in changed_sites:
-            for link in r["new_links"]:
-                logger.info(f"  {link}")
-        msg_lines = []
-        for r in changed_sites:
-            msg_lines.append(f"\n{r['site']} ({r['method']}): {len(r['new_links'])} new links")
-            for link in r["new_links"]:
-                msg_lines.append(link)
-        message = "\n".join(msg_lines)
-        send_info_notification(message, context="New offers")
+        except Exception as e:
+            logger.error(f"Failed to update houses.json: {e}")
+    
+    # Send notification (skip if in HTML output mode)
+    if not args.save_html:
+        message_parts = []
+        total_new = 0
+        
+        for provider_name in sorted(provider_results.keys()):
+            res = provider_results[provider_name]
+            if res["new"] > 0:
+                total_new += res["new"]
+                message_parts.append(f"\n{provider_name}: {res['new']} new listings")
+                for link_data in res["new_links"]:  # Show max 3 per provider
+                    title = link_data.get("title", "No title")[:60]
+                    message_parts.append(f"  • {title}")
+                if res["new"] > 3:
+                    message_parts.append(f"  ... and {res['new'] - 3} more")
+        
+        if message_parts:
+            message = "\n".join(message_parts)
+            logger.info(f"Found {total_new} new listings total")
+            send_info_notification(message, context="New house offers")
+        else:
+            logger.info("No new listings found")
     else:
-        logger.info("No new offers found.")
+        logger.info("HTML output mode - skipping Pushover notification")
 
-# Add this entry point:
 if __name__ == "__main__":
     asyncio.run(main())
