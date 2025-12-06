@@ -18,7 +18,7 @@ from playwright.async_api import async_playwright
 from pushover_utils import send_info_notification, set_dry_run_mode
 
 # Configure logging
-LOG_FILE = Path(__file__).resolve().parent / "logs/main_v2.log"
+LOG_FILE = Path(__file__).resolve().parent / "logs/main.log"
 HOUSES_LOG_FILE = Path(__file__).resolve().parent / "logs/houses.json"
 
 root_logger = logging.getLogger()
