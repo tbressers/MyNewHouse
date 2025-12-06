@@ -14,3 +14,4 @@ uv.lock
 cron.log
 *.log
 logs/
+debug_html/

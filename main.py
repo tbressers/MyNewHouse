@@ -38,6 +38,11 @@ root_logger.addHandler(console_handler)
 
 logger = logging.getLogger(__name__)
 
+# Cities to analyze (for regex patterns and filtering)
+CITIES = [
+    "Nijmegen"
+]
+
 # Provider URLs to scan
 PROVIDER_URLS = [
     "https://kamernet.nl/en/for-rent/student-housing-nijmegen",
@@ -128,7 +133,7 @@ def is_property_listing(title: str, url: str, strict: bool = True) -> bool:
                 Strict mode filters out more false positives, relaxed catches more listings.
     
     A listing must have:
-    1. Dutch address pattern with street name and number somewhere in title
+    1. Dutch address pattern with street name (number optional) or URL pattern
     2. Location indicators (city name or "te", "in", etc.)
     3. Property indicators (size m², price €, property type)
     """
@@ -137,23 +142,36 @@ def is_property_listing(title: str, url: str, strict: bool = True) -> bool:
     title = title.strip()
     url = url.lower()
     
-    # Pattern 1: Dutch address anywhere in title
+    # Pattern 1: Dutch address anywhere in title OR in URL
     # Match: "StreetName 123", "StreetName 123-456", "StreetName 123 K5", etc.
+    # Also match: "StreetName - City" (for providers like nijmegenstudentenstad)
     # Allow optional prefix like "New" before the street name
-    street_pattern = r'(?:new\s+)?[A-Za-z][A-Za-z\s\.\-]*?\s+\d+(?:\s*[-A-Za-z0-9]*)?'
-    has_street = bool(re.search(street_pattern, title, re.IGNORECASE))
+    street_pattern_with_number = r'(?:new\s+)?[A-Za-z][A-Za-z\s\.\-]*?\s+\d+(?:\s*[-A-Za-z0-9]*)?'
+    
+    # Build city pattern from CITIES array for street names like "Street - City"
+    cities_pattern = '|'.join(CITIES)
+    street_pattern_without_number = rf'(?:new\s+)?[A-Za-z][A-Za-z\s\.\-]+\s*-\s*(?:{cities_pattern})'
+    
+    has_street_in_title = bool(re.search(street_pattern_with_number, title, re.IGNORECASE)) or \
+                          bool(re.search(street_pattern_without_number, title, re.IGNORECASE))
+    
+    # Also check if URL contains listing pattern (e.g., /kamers-in-nijmegen/street-name-city/date)
+    has_street_in_url = bool(re.search(r'/kamers-in-nijmegen/[a-z\-]+/\d{4}-\d{2}-\d{2}', url))
+    
+    has_street = has_street_in_title or has_street_in_url
     
     # Pattern 2: Location indicator - city name, "te", "in", "bij", etc.
     # This ensures we're looking at an address, not random digits in title
-    location_pattern = r'\b(?:nijmegen|arnhem|wageningen|gennep|oss|te|in|bij|at|city|stad)\b'
-    has_location = bool(re.search(location_pattern, title, re.IGNORECASE))
+    location_cities = '|'.join(CITIES)
+    location_pattern = rf'\b(?:{location_cities}|te|in|bij|at|city|stad)\b'
+    has_location = bool(re.search(location_pattern, title, re.IGNORECASE)) or bool(re.search(location_pattern, url))
     
     # Pattern 3: Must have property-related content indicators
     property_indicators = [
         r'\d+\s*m²',                          # Size: "42 m²"
         r'€\s*[\d,\.]+',                      # Price: "€ 1200" or "€1,200.50"
         r'\d+\s*(?:/maand|/month|per maand|per month)', # Price per month
-        r'\b(?:room|kamer|studio|apartment|appartement|woning|huis|house|flat|unit)\b',  # Property types
+        r'\b(?:room|kamer|studio|apartment|appartement|woning|huis|house|flat|unit|bekijk)\b',  # Property types (added "bekijk")
         r'(?:furnished|unfurnished|gemeubileerd|ongemeubileerd)',  # Furnishing
         r'(?:beschikbaar|available|available from)',  # Availability
     ]
@@ -252,7 +270,7 @@ def extract_listing_links(html: str, base_url: str) -> Dict[str, Dict]:
         logger.warning(f"Error parsing HTML: {e}")
         return {}
 
-async def scan_provider_with_retry(browser, url: str, max_retries: int = 2) -> tuple[str, List[Dict]]:
+async def scan_provider_with_retry(browser, url: str, max_retries: int = 2, save_html_dir: str = None) -> tuple[str, List[Dict]]:
     """
     Scan a provider URL with automatic retry on failure.
     
@@ -260,6 +278,7 @@ async def scan_provider_with_retry(browser, url: str, max_retries: int = 2) -> t
         browser: Playwright browser instance
         url: Provider URL to scan
         max_retries: Maximum number of retry attempts (default: 2)
+        save_html_dir: Optional directory to save HTML output for debugging
     
     Returns:
         Tuple of (provider_name, list_of_links)
@@ -268,7 +287,7 @@ async def scan_provider_with_retry(browser, url: str, max_retries: int = 2) -> t
     
     for attempt in range(max_retries):
         try:
-            return await scan_provider(browser, url)
+            return await scan_provider(browser, url, save_html_dir=save_html_dir)
         except Exception as e:
             if attempt < max_retries - 1:
                 wait_time = 2 ** attempt  # 1s, then 2s
@@ -280,7 +299,7 @@ async def scan_provider_with_retry(browser, url: str, max_retries: int = 2) -> t
     
     return provider_name, []
 
-async def scan_provider(browser, url: str) -> tuple[str, List[Dict]]:
+async def scan_provider(browser, url: str, save_html_dir: str = None) -> tuple[str, List[Dict]]:
     """
     Scan a provider URL and extract housing listing links.
     Returns (provider_name, list_of_links_with_metadata)
@@ -345,6 +364,18 @@ async def scan_provider(browser, url: str) -> tuple[str, List[Dict]]:
         html = await page.content()
         logger.info(f"{provider_name}: extracted HTML ({len(html)} bytes)")
         
+        # Save HTML for debugging if requested
+        if save_html_dir:
+            try:
+                save_path = Path(save_html_dir)
+                save_path.mkdir(parents=True, exist_ok=True)
+                filename = save_path / f"{provider_name}_page1.html"
+                with open(filename, "w", encoding="utf-8") as f:
+                    f.write(html)
+                logger.info(f"{provider_name}: saved HTML to {filename}")
+            except Exception as e:
+                logger.error(f"{provider_name}: failed to save HTML: {e}")
+        
         # Extract all links from first page
         all_links = extract_listing_links(html, page.url)
         logger.info(f"{provider_name}: found {len(all_links)} total links on page 1")
@@ -385,6 +416,17 @@ async def scan_provider(browser, url: str) -> tuple[str, List[Dict]]:
                 
                 # Extract links from this page
                 page_html = await page.content()
+                
+                # Save pagination HTML for debugging if requested
+                if save_html_dir:
+                    try:
+                        filename = Path(save_html_dir) / f"{provider_name}_page{page_num}.html"
+                        with open(filename, "w", encoding="utf-8") as f:
+                            f.write(page_html)
+                        logger.debug(f"{provider_name}: saved page {page_num} HTML")
+                    except Exception as e:
+                        logger.debug(f"{provider_name}: failed to save page {page_num} HTML: {e}")
+                
                 page_links = extract_listing_links(page_html, page.url)
                 logger.debug(f"{provider_name}: found {len(page_links)} links on page {page_num}")
                 
@@ -418,6 +460,7 @@ async def main():
     parser.add_argument("--dry-run", action="store_true", help="Run without sending Pushover notifications")
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG logging")
     parser.add_argument("--provider", type=str, help="Scan only a specific provider (by name or URL)")
+    parser.add_argument("--save-html", type=str, help="Save HTML output to specified directory for debugging")
     args = parser.parse_args()
     
     if args.debug:
@@ -454,7 +497,7 @@ async def main():
             browser = await pw.chromium.launch(headless=True)
             
             for url in urls_to_scan:
-                provider_name, links = await scan_provider_with_retry(browser, url)
+                provider_name, links = await scan_provider_with_retry(browser, url, save_html_dir=args.save_html)
                 
                 # Deduplicate links from this provider
                 unique_links = {}
