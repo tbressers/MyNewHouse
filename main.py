@@ -79,6 +79,14 @@ PROVIDER_CONFIG = {
         "overview_patterns": [],
         "dom_link_href_allow": []
     },
+    "sshn": {
+        "strict_filtering": True,
+        "wait_for_js": False,
+        "follow_subpages": False,
+        "subpage_follow_limit": 0,
+        "overview_patterns": [],
+        "dom_link_href_allow": []
+    },
     "wibeco": {
         "strict_filtering": True,
         "wait_for_js": False,
@@ -144,10 +152,18 @@ PROVIDER_CONFIG = {
 }
 
 def get_provider_name(url: str) -> str:
-    """Extract provider name from URL"""
+    """Extract provider name from URL using the second-level domain.
+    Examples:
+    - mijn.sshn.nl -> sshn
+    - www.pararius.nl -> pararius
+    - kamernijmegen.com -> kamernijmegen
+    """
     parsed = urlparse(url)
-    domain = parsed.netloc.replace("www.", "").split(".")[0]
-    return domain
+    host = parsed.netloc.replace("www.", "")
+    parts = host.split(".")
+    if len(parts) >= 2:
+        return parts[-2]
+    return parts[0] if parts else host
 
 def load_exclude_patterns() -> List[re.Pattern]:
     """Load exclusion patterns from logs/exclude.json and compile them."""
@@ -366,7 +382,7 @@ def filter_property_listings(links: List[Dict], strict: bool = True) -> List[Dic
     logger.info(f"Filtered to {len(filtered_links)} property listings (from {len(links)} total links)")
     return filtered_links
 
-async def scan_provider_with_retry(browser, url: str, exclude_patterns: List[re.Pattern], save_html_dir: str = None, max_retries: int = 2) -> tuple[str, List[Dict]]:
+async def scan_provider_with_retry(browser, url: str, exclude_patterns: List[re.Pattern], save_html_dir: str = None, max_retries: int = 2, quicktest: bool = False) -> tuple[str, List[Dict]]:
     """
     Scan a provider URL with automatic retry on failure.
     
@@ -384,7 +400,7 @@ async def scan_provider_with_retry(browser, url: str, exclude_patterns: List[re.
     
     for attempt in range(max_retries):
         try:
-            return await scan_provider(browser, url, exclude_patterns, save_html_dir=save_html_dir)
+            return await scan_provider(browser, url, exclude_patterns, save_html_dir=save_html_dir, quicktest=quicktest)
         except Exception as e:
             if attempt < max_retries - 1:
                 wait_time = 2 ** attempt  # 1s, then 2s
@@ -396,7 +412,7 @@ async def scan_provider_with_retry(browser, url: str, exclude_patterns: List[re.
     
     return provider_name, []
 
-async def scan_provider(browser, url: str, exclude_patterns: List[re.Pattern], save_html_dir: str = None) -> tuple[str, List[Dict]]:
+async def scan_provider(browser, url: str, exclude_patterns: List[re.Pattern], save_html_dir: str = None, quicktest: bool = False) -> tuple[str, List[Dict]]:
     """
     Scan a provider URL and extract housing listing links.
     Returns (provider_name, list_of_links_with_metadata)
@@ -596,6 +612,11 @@ async def scan_provider(browser, url: str, exclude_patterns: List[re.Pattern], s
         filtered_links = filter_property_listings(candidate_links, strict=strict_filtering)
         logger.info(f"{provider_name}: filtered to {len(filtered_links)} property listings (strict={strict_filtering})")
         
+        # In quicktest mode, stop after first listing and skip page price extraction
+        if quicktest:
+            filtered_links = filtered_links[:1]
+            return provider_name, filtered_links
+        
         # Extract missing prices from FILTERED listing pages only
         links_needing_price = [link for link in filtered_links if not link.get("price")]
         if links_needing_price:
@@ -641,6 +662,7 @@ async def main():
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG logging")
     parser.add_argument("--provider", type=str, help="Scan only a specific provider (by name or URL)")
     parser.add_argument("--save-html", type=str, help="Save HTML output to specified directory for debugging")
+    parser.add_argument("--quicktest", action="store_true", help="Stop after the first house found per provider")
     args = parser.parse_args()
     
     if args.debug:
@@ -707,7 +729,11 @@ async def main():
             browser = await pw.chromium.launch(headless=True)
             
             for url in urls_to_scan:
-                provider_name, links = await scan_provider_with_retry(browser, url, exclude_patterns, save_html_dir=args.save_html)
+                provider_name, links = await scan_provider_with_retry(browser, url, exclude_patterns, save_html_dir=args.save_html, quicktest=args.quicktest)
+
+                # Redundant safety: ensure only a single listing in quicktest mode
+                if args.quicktest and links:
+                    links = links[:1]
                 
                 # Deduplicate links from this provider
                 unique_links = {}
