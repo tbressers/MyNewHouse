@@ -64,42 +64,91 @@ PROVIDER_CONFIG = {
     "kamernet": {
         "strict_filtering": True,        # High quality listings, keep strict
         "wait_for_js": False,
+        # Optional: follow subpages if needed in future
+        "follow_subpages": False,
+        "subpage_follow_limit": 0,
+        "overview_patterns": [],
+        "dom_link_href_allow": []
     },
     "mijn": {
         "strict_filtering": True,
         "wait_for_js": False,
+        "follow_subpages": False,
+        "subpage_follow_limit": 0,
+        "overview_patterns": [],
+        "dom_link_href_allow": []
     },
     "wibeco": {
         "strict_filtering": True,
         "wait_for_js": False,
+        "follow_subpages": False,
+        "subpage_follow_limit": 0,
+        "overview_patterns": [],
+        "dom_link_href_allow": []
     },
     "nijmegenstudentenstad": {
         "strict_filtering": False,       # Portal with minimal info, use relaxed
         "wait_for_js": False,
+        "follow_subpages": False,
+        "subpage_follow_limit": 0,
+        "overview_patterns": [],
+        "dom_link_href_allow": []
     },
     "pararius": {
         "strict_filtering": False,       # Client-side rendered, expect minimal text
         "wait_for_js": True,             # Needs JS to render
+        # New: follow overview sub-pages and harvest detail links
+        "follow_subpages": True,
+        "subpage_follow_limit": 5,       # keep small to avoid crawl explosion
+        # Treat these as overview pages, not individual listings
+        "overview_patterns": [
+            r'/huurwoningen/',                                               # general listing root
+            r'/huurwoningen/[^/]+/(?:wijk-[^/]+/)?(?:appartement|kamer|studio|woning)/?$'
+        ],
+        # HREFs that look like actual detail pages (anchors often have no innerText)
+        "dom_link_href_allow": [
+            r'/[a-z\-]+-te-huur/',                                           # e.g. /appartement-te-huur/
+        ]
     },
     "kamernijmegen": {
         "strict_filtering": False,       # News/nav heavy, try relaxed filtering
         "wait_for_js": False,
+        "follow_subpages": False,
+        "subpage_follow_limit": 0,
+        "overview_patterns": [],
+        "dom_link_href_allow": []
     },
     "nymveste": {
         "strict_filtering": False,
         "wait_for_js": False,
+        "follow_subpages": False,
+        "subpage_follow_limit": 0,
+        "overview_patterns": [],
+        "dom_link_href_allow": []
     },
     "kbsvastgoedbeheer": {
         "strict_filtering": True,
         "wait_for_js": False,
+        "follow_subpages": False,
+        "subpage_follow_limit": 0,
+        "overview_patterns": [],
+        "dom_link_href_allow": []
     },
     "klikenhuur": {
         "strict_filtering": True,
         "wait_for_js": False,
+        "follow_subpages": False,
+        "subpage_follow_limit": 0,
+        "overview_patterns": [],
+        "dom_link_href_allow": []
     },
     "huurzone": {
         "strict_filtering": True,
         "wait_for_js": False,
+        "follow_subpages": False,
+        "subpage_follow_limit": 0,
+        "overview_patterns": [],
+        "dom_link_href_allow": []
     },
 }
 
@@ -109,91 +158,187 @@ def get_provider_name(url: str) -> str:
     domain = parsed.netloc.replace("www.", "").split(".")[0]
     return domain
 
-def load_existing_links() -> Set[str]:
-    """Load all existing house links from houses.json"""
-    if not HOUSES_LOG_FILE.exists():
-        return set()
+def is_overview_subpage(url: str, provider_name: str) -> bool:
+    """Detect provider-specific overview/listing pages that group multiple results."""
+    cfg = PROVIDER_CONFIG.get(provider_name, {})
+    patterns = cfg.get("overview_patterns", []) or []
+
+    if any(re.search(p, url) for p in patterns):
+        return True
+
+    # Generic fallbacks for Dutch rental portals
+    generic_overview = [
+        r'/huurwoningen(?:/|$)',                         # category trees
+        r'/for-rent(?:/|$)',
+        r'/kamer(?:s)?(?:/|$)$',                         # ends with type
+        r'/appartement(?:en)?(?:/|$)$',
+        r'/studio(?:s)?(?:/|$)$',
+        r'/woning(?:en)?(?:/|$)$'
+    ]
+    return any(re.search(p, url) for p in generic_overview)
+
+def extract_listing_links(html: str, base_url: str) -> Dict[str, Dict]:
+    """
+    Extract all links from HTML.
+    Returns dict mapping link -> {title, price, date} where available.
+    """
+    from html.parser import HTMLParser
+    
+    links_data = {}
+    
+    class LinkExtractor(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.current_text = []
+            self.listing_data = {}
+            self.in_anchor = False
+        
+        def handle_starttag(self, tag, attrs):
+            attrs_dict = dict(attrs)
+            if tag == "a" and "href" in attrs_dict:
+                href = attrs_dict["href"]
+                if href and not href.startswith("javascript"):
+                    full_url = urljoin(base_url, href)
+                    self.current_text = []
+                    self.in_anchor = True
+                    # capture potential title fallbacks (many cards use aria-label/title)
+                    fallback = attrs_dict.get("aria-label") or attrs_dict.get("title") or ""
+                    self.listing_data = {"link": full_url, "fallback_title": fallback}
+            # capture image alt inside an anchor as text
+            if tag == "img" and self.in_anchor:
+                alt_text = dict(attrs).get("alt")
+                if alt_text:
+                    self.current_text.append(alt_text.strip())
+        
+        def handle_data(self, data):
+            text = data.strip()
+            if self.in_anchor and text:
+                self.current_text.append(text)
+        
+        def handle_endtag(self, tag):
+            if tag == "a" and self.listing_data.get("link"):
+                self.in_anchor = False
+                title = " ".join(self.current_text).strip()
+                if not title:
+                    # fall back to stored aria-label/title
+                    title = self.listing_data.get("fallback_title", "").strip()
+                title = " ".join(title.split())
+
+                if title:
+                    self.listing_data["title"] = title
+                    # Extract price from title
+                    price = extract_price_from_text(title)
+                    if price > 0:
+                        self.listing_data["price"] = price
+                    links_data[self.listing_data["link"]] = {k: v for k, v in self.listing_data.items() if k != "fallback_title"}
+                
+                self.listing_data = {}
+                self.current_text = []
     
     try:
-        with HOUSES_LOG_FILE.open("r", encoding="utf-8") as f:
-            houses = json.load(f)
-        links = {h.get("link") for h in houses if h.get("link")}
-        logger.info(f"Loaded {len(links)} existing links from houses.json")
-        return links
+        parser = LinkExtractor()
+        parser.feed(html)
+        return links_data
     except Exception as e:
-        logger.error(f"Failed to load houses.json: {e}")
-        return set()
+        logger.warning(f"Error parsing HTML: {e}")
+        return {}
+
+async def _extract_links_via_dom(page, base_url: str, provider_name: str) -> Dict[str, Dict]:
+    """
+    DOM-based extraction to catch anchors without visible text (e.g., listing cards).
+    Uses provider-specific allowlist patterns for hrefs.
+    """
+    cfg = PROVIDER_CONFIG.get(provider_name, {})
+    allow_patterns = [re.compile(p) for p in (cfg.get("dom_link_href_allow") or [])]
+
+    try:
+        anchors = await page.evaluate("""
+            () => Array.from(document.querySelectorAll('a[href]')).map(a => ({
+                href: a.href,
+                text: (a.textContent || '').trim(),
+                title: a.getAttribute('title') || '',
+                aria: a.getAttribute('aria-label') || ''
+            }))
+        """)
+    except Exception as e:
+        logger.debug(f"{provider_name}: DOM link extraction failed: {e}")
+        return {}
+
+    base_host = urlparse(base_url).netloc
+    out: Dict[str, Dict] = {}
+    for a in anchors:
+        href = a.get("href") or ""
+        if not href:
+            continue
+        if urlparse(href).netloc and urlparse(href).netloc != base_host:
+            continue  # stay on-site
+
+        # If allowlist patterns are defined, keep only those that match
+        if allow_patterns and not any(p.search(href) for p in allow_patterns):
+            continue
+
+        title = a.get("text") or a.get("aria") or a.get("title") or ""
+        title = " ".join(title.split())
+        data = {"link": href}
+        if title:
+            data["title"] = title
+            price = extract_price_from_text(title)
+            if price > 0:
+                data["price"] = price
+        out[href] = data
+
+    return out
 
 def is_property_listing(title: str, url: str, strict: bool = True) -> bool:
     """
     Detect if a link is a real property listing using pure regex patterns.
-    
-    Args:
-        title: Link text/title to analyze
-        url: Link URL to analyze
-        strict: If True, requires all 3 patterns. If False, requires 2/3 patterns.
-                Strict mode filters out more false positives, relaxed catches more listings.
-    
-    A listing must have:
-    1. Dutch address pattern with street name (number optional) or URL pattern
-    2. Location indicators (city name or "te", "in", etc.)
-    3. Property indicators (size m², price €, property type)
     """
     title = title.strip()
     url = url.lower()
     
     # Pattern 1: Dutch address anywhere in title OR in URL
-    # Match: "StreetName 123", "StreetName 123-456", "StreetName 123 K5", etc.
-    # Also match: "StreetName - City" (for providers like nijmegenstudentenstad)
-    # Allow optional prefix like "New" before the street name
     street_pattern_with_number = r'(?:new\s+)?[A-Za-z][A-Za-z\s\.\-]*?\s+\d+(?:\s*[-A-Za-z0-9]*)?'
-    
-    # Build city pattern from CITIES array for street names like "Street - City"
     cities_pattern = '|'.join(CITIES)
     street_pattern_without_number = rf'(?:new\s+)?[A-Za-z][A-Za-z\s\.\-]+\s*-\s*(?:{cities_pattern})'
     
     has_street_in_title = bool(re.search(street_pattern_with_number, title, re.IGNORECASE)) or \
                           bool(re.search(street_pattern_without_number, title, re.IGNORECASE))
     
-    # Also check if URL contains listing pattern (e.g., /kamers-in-nijmegen/street-name-city/date)
     has_street_in_url = bool(re.search(r'/kamers-in-nijmegen/[a-z\-]+/\d{4}-\d{2}-\d{2}', url))
-    
     has_street = has_street_in_title or has_street_in_url
     
     # Pattern 2: Location indicator - city name, "te", "in", "bij", etc.
-    # This ensures we're looking at an address, not random digits in title
     location_cities = '|'.join(CITIES)
     location_pattern = rf'\b(?:{location_cities}|te|in|bij|at|city|stad)\b'
     has_location = bool(re.search(location_pattern, title, re.IGNORECASE)) or bool(re.search(location_pattern, url))
     
     # Pattern 3: Must have property-related content indicators
     property_indicators = [
-        r'\d+\s*m²',                          # Size: "42 m²"
-        r'€\s*[\d,\.]+',                      # Price: "€ 1200" or "€1,200.50"
-        r'\d+\s*(?:/maand|/month|per maand|per month)', # Price per month
-        r'\b(?:room|kamer|studio|apartment|appartement|woning|huis|house|flat|unit|bekijk)\b',  # Property types (added "bekijk")
-        r'(?:furnished|unfurnished|gemeubileerd|ongemeubileerd)',  # Furnishing
-        r'(?:beschikbaar|available|available from)',  # Availability
+        r'\d+\s*m²',
+        r'€\s*[\d,\.]+',
+        r'\d+\s*(?:/maand|/month|per maand|per month)',
+        r'\b(?:room|kamer|studio|apartment|appartement|woning|huis|house|flat|unit|bekijk)\b',
+        r'(?:furnished|unfurnished|gemeubileerd|ongemeubileerd)',
+        r'(?:beschikbaar|available|available from)',
     ]
     has_property_indicator = any(re.search(pattern, title, re.IGNORECASE) for pattern in property_indicators)
     
-    # Count how many patterns we matched
     pattern_matches = sum([has_street, has_location, has_property_indicator])
     
     # Pattern 4: URL must NOT be pagination/filter/overview
     bad_url_patterns = [
-        r'[\?&]page=',           # Pagination: ?page=2
-        r'[\?&]start=',          # Pagination: ?start=20
-        r'-overzicht(?:\?|/|$)',  # Overview pages
+        r'[\?&]page=',
+        r'[\?&]start=',
+        r'-overzicht(?:\?|/|$)',
         r'/(?:en|nl)/(?:for-rent|huurwoningen)\s*$',  # Just category, no specific property
+        # New: common category endings such as Pararius types (avoid saving overview pages)
+        r'/huurwoningen/.*/(?:appartement|kamer|studio|woning)/?$'
     ]
     
     if any(re.search(pattern, url) for pattern in bad_url_patterns):
         return False
     
-    # Require minimum patterns based on strict mode
     required_patterns = 3 if strict else 2
-    
     return pattern_matches >= required_patterns
 
 def filter_property_listings(links: List[Dict], strict: bool = True) -> List[Dict]:
@@ -218,61 +363,6 @@ def filter_property_listings(links: List[Dict], strict: bool = True) -> List[Dic
     
     logger.info(f"Filtered to {len(filtered_links)} property listings (from {len(links)} total links)")
     return filtered_links
-
-def extract_listing_links(html: str, base_url: str) -> Dict[str, Dict]:
-    """
-    Extract all links from HTML.
-    Returns dict mapping link -> {title, price, date} where available.
-    """
-    from html.parser import HTMLParser
-    
-    links_data = {}
-    
-    class LinkExtractor(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.current_text = []
-            self.listing_data = {}
-        
-        def handle_starttag(self, tag, attrs):
-            attrs_dict = dict(attrs)
-            if tag == "a" and "href" in attrs_dict:
-                href = attrs_dict["href"]
-                if href and not href.startswith("javascript"):
-                    full_url = urljoin(base_url, href)
-                    self.current_text = []
-                    self.listing_data = {"link": full_url}
-        
-        def handle_data(self, data):
-            text = data.strip()
-            if text and len(text) > 0:
-                self.current_text.append(text)
-        
-        def handle_endtag(self, tag):
-            if tag == "a" and self.listing_data.get("link"):
-                title = " ".join(self.current_text)
-                # Normalize title (remove extra spaces)
-                title = " ".join(title.split())
-                
-                # Keep all links, let LLM decide
-                if title:  # Only if there's some text
-                    self.listing_data["title"] = title
-                    # Extract price from title
-                    price = extract_price_from_text(title)
-                    if price > 0:
-                        self.listing_data["price"] = price
-                    links_data[self.listing_data["link"]] = self.listing_data
-                
-                self.listing_data = {}
-                self.current_text = []
-    
-    try:
-        parser = LinkExtractor()
-        parser.feed(html)
-        return links_data
-    except Exception as e:
-        logger.warning(f"Error parsing HTML: {e}")
-        return {}
 
 async def scan_provider_with_retry(browser, url: str, max_retries: int = 2, save_html_dir: str = None) -> tuple[str, List[Dict]]:
     """
@@ -322,7 +412,6 @@ async def scan_provider(browser, url: str, save_html_dir: str = None) -> tuple[s
         # Wait for dynamic content to render if configured
         if config.get("wait_for_js"):
             try:
-                # Give JavaScript time to execute
                 await asyncio.sleep(2)
                 await page.wait_for_load_state("networkidle", timeout=3000)
                 logger.debug(f"{provider_name}: waited for dynamic content")
@@ -380,9 +469,17 @@ async def scan_provider(browser, url: str, save_html_dir: str = None) -> tuple[s
             except Exception as e:
                 logger.error(f"{provider_name}: failed to save HTML: {e}")
         
-        # Extract all links from first page
+        # Extract all links from first page (HTML parse + DOM-based for anchors without text)
         all_links = extract_listing_links(html, page.url)
-        logger.info(f"{provider_name}: found {len(all_links)} total links on page 1")
+        logger.info(f"{provider_name}: found {len(all_links)} total links on page 1 (HTML parse)")
+        try:
+            dom_links = await _extract_links_via_dom(page, page.url, provider_name)
+            for link in dom_links.values():
+                if link["link"] not in all_links:
+                    all_links[link["link"]] = link
+            logger.info(f"{provider_name}: merged DOM links, now {len(all_links)} links on page 1")
+        except Exception as e:
+            logger.debug(f"{provider_name}: DOM extraction skipped: {e}")
         
         # Try to follow pagination (up to 3 additional pages)
         pagination_limit = 3
@@ -406,22 +503,18 @@ async def scan_provider(browser, url: str, save_html_dir: str = None) -> tuple[s
                     logger.debug(f"{provider_name}: no pagination link found for page {page_num}")
                     break
                 
-                # Get the href and navigate
                 next_url = await next_link.evaluate("el => el.getAttribute('href')")
                 if not next_url:
                     break
                 
-                # Resolve relative URLs
                 next_url = urljoin(page.url, next_url)
                 logger.debug(f"{provider_name}: following pagination to page {page_num}")
                 
                 await page.goto(next_url, wait_until="networkidle", timeout=15000)
                 await asyncio.sleep(0.5)
                 
-                # Extract links from this page
                 page_html = await page.content()
                 
-                # Save pagination HTML for debugging if requested
                 if save_html_dir:
                     try:
                         filename = Path(save_html_dir) / f"{provider_name}_page{page_num}.html"
@@ -432,10 +525,12 @@ async def scan_provider(browser, url: str, save_html_dir: str = None) -> tuple[s
                         logger.debug(f"{provider_name}: failed to save page {page_num} HTML: {e}")
                 
                 page_links = extract_listing_links(page_html, page.url)
-                logger.debug(f"{provider_name}: found {len(page_links)} links on page {page_num}")
+                try:
+                    dom_page_links = await _extract_links_via_dom(page, page.url, provider_name)
+                except Exception:
+                    dom_page_links = {}
                 
-                # Add to all_links (deduplicating by URL)
-                for link in page_links.values():
+                for link in {**page_links, **dom_page_links}.values():
                     if link["link"] not in all_links:
                         all_links[link["link"]] = link
                 
@@ -444,11 +539,58 @@ async def scan_provider(browser, url: str, save_html_dir: str = None) -> tuple[s
                 break
         
         logger.info(f"{provider_name}: total {len(all_links)} links after pagination")
-        
+
+        # NEW: Follow a small number of overview sub-pages and harvest their listing links
+        if config.get("follow_subpages"):
+            subpages = [u for u in list(all_links.keys()) if is_overview_subpage(u, provider_name)]
+            limit = int(config.get("subpage_follow_limit", 0))
+            visited = set()
+            for idx, sub_url in enumerate(subpages[:limit]):
+                if sub_url in visited:
+                    continue
+                visited.add(sub_url)
+                try:
+                    logger.info(f"{provider_name}: expanding overview sub-page {idx+1}/{limit}: {sub_url}")
+                    await page.goto(sub_url, wait_until="networkidle", timeout=20000)
+                    if config.get("wait_for_js"):
+                        try:
+                            await asyncio.sleep(1.0)
+                            await page.wait_for_load_state("networkidle", timeout=3000)
+                        except Exception:
+                            pass
+                    sub_html = await page.content()
+                    sub_links_html = extract_listing_links(sub_html, page.url)
+                    try:
+                        sub_links_dom = await _extract_links_via_dom(page, page.url, provider_name)
+                    except Exception:
+                        sub_links_dom = {}
+                    # merge
+                    for link in {**sub_links_html, **sub_links_dom}.values():
+                        if link["link"] not in all_links:
+                            all_links[link["link"]] = link
+
+                    # Optional: save subpage HTML
+                    if save_html_dir:
+                        try:
+                            filename = Path(save_html_dir) / f"{provider_name}_sub_{idx+1}.html"
+                            with open(filename, "w", encoding="utf-8") as f:
+                                f.write(sub_html)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.debug(f"{provider_name}: failed to expand subpage {sub_url}: {e}")
+
+            logger.info(f"{provider_name}: total {len(all_links)} links after sub-page expansion")
+
+        # Remove overview pages from candidates before filtering
+        candidate_links = [
+            link for link in all_links.values()
+            if not is_overview_subpage(link.get("link", ""), provider_name)
+        ]
+
         # Filter links to property listings FIRST (before fetching prices from pages)
-        # This avoids visiting unrelated pages like Wikipedia, footer links, etc.
         strict_filtering = config.get("strict_filtering", True)
-        filtered_links = filter_property_listings(list(all_links.values()), strict=strict_filtering)
+        filtered_links = filter_property_listings(candidate_links, strict=strict_filtering)
         logger.info(f"{provider_name}: filtered to {len(filtered_links)} property listings (strict={strict_filtering})")
         
         # Extract missing prices from FILTERED listing pages only
@@ -469,6 +611,26 @@ async def scan_provider(browser, url: str, save_html_dir: str = None) -> tuple[s
     
     finally:
         await context.close()
+
+def load_existing_links() -> Set[str]:
+    """
+    Load previously saved listing links from houses.json to avoid duplicates.
+    Returns a set of link URLs.
+    """
+    links: Set[str] = set()
+    try:
+        if HOUSES_LOG_FILE.exists():
+            with HOUSES_LOG_FILE.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+                for item in data:
+                    url = item.get("link", "")
+                    if url:
+                        links.add(url)
+        else:
+            logger.info(f"No existing houses.json found at {HOUSES_LOG_FILE}, starting fresh")
+    except Exception as e:
+        logger.error(f"Failed to load existing links from houses.json: {e}")
+    return links
 
 async def main():
     parser = argparse.ArgumentParser(description="Scan housing providers for new listings (v2)")
