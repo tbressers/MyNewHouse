@@ -19,6 +19,7 @@ from playwright.async_api import async_playwright
 from pushover_utils import send_info_notification, set_dry_run_mode
 from price_extraction import parse_price_to_int, extract_price_from_text, extract_price_from_page
 from intelligent_classifier import IntelligentClassifier
+from url_utils import normalize_url
 
 # Configure logging
 LOG_FILE = Path(__file__).resolve().parent / "logs/main.log"
@@ -96,11 +97,12 @@ def extract_listing_links(html: str, base_url: str) -> Dict[str, Dict]:
                 href = attrs_dict["href"]
                 if href and not href.startswith("javascript"):
                     full_url = urljoin(base_url, href)
+                    normalized_url = normalize_url(full_url)
                     self.current_text = []
                     self.in_anchor = True
                     # capture potential title fallbacks (many cards use aria-label/title)
                     fallback = attrs_dict.get("aria-label") or attrs_dict.get("title") or ""
-                    self.listing_data = {"link": full_url, "fallback_title": fallback}
+                    self.listing_data = {"link": normalized_url, "fallback_title": fallback}
             # capture image alt inside an anchor as text
             if tag == "img" and self.in_anchor:
                 alt_text = dict(attrs).get("alt")
@@ -167,15 +169,16 @@ async def _extract_links_via_dom(page, base_url: str, provider_name: str) -> Dic
         if urlparse(href).netloc and urlparse(href).netloc != base_host:
             continue  # stay on-site
 
+        normalized_href = normalize_url(href)
         title = a.get("text") or a.get("aria") or a.get("title") or ""
         title = " ".join(title.split())
-        data = {"link": href}
+        data = {"link": normalized_href}
         if title:
             data["title"] = title
             price = extract_price_from_text(title)
             if price > 0:
                 data["price"] = price
-        out[href] = data
+        out[normalized_href] = data
 
     return out
 
@@ -428,7 +431,7 @@ async def scan_provider(browser, url: str, save_html_dir: str = None, quicktest:
 def load_existing_links() -> Set[str]:
     """
     Load previously saved listing links from houses.json to avoid duplicates.
-    Returns a set of link URLs.
+    Returns a set of normalized link URLs.
     """
     links: Set[str] = set()
     try:
@@ -438,7 +441,7 @@ def load_existing_links() -> Set[str]:
                 for item in data:
                     url = item.get("link", "")
                     if url:
-                        links.add(url)
+                        links.add(normalize_url(url))
         else:
             logger.info(f"No existing houses.json found at {HOUSES_LOG_FILE}, starting fresh")
     except Exception as e:
@@ -474,7 +477,7 @@ async def main():
             houses_log_data = []
 
     existing_link_map: Dict[str, Dict] = {
-        item.get("link", ""): item for item in houses_log_data if item.get("link")
+        normalize_url(item.get("link", "")): item for item in houses_log_data if item.get("link")
     }
     updated_existing = 0
     logger.info(f"Starting scan with {len(existing_links)} known links")
@@ -510,8 +513,9 @@ async def main():
                 # Deduplicate links from this provider
                 unique_links = {}
                 for link_data in links:
-                    link_url = link_data.get("link")
+                    link_url = normalize_url(link_data.get("link", ""))
                     if link_url and link_url not in unique_links:
+                        link_data["link"] = link_url  # Store normalized URL
                         unique_links[link_url] = link_data
 
                     # If we already stored this link earlier but price was missing, backfill it
@@ -529,7 +533,7 @@ async def main():
                 # Find new links
                 new_links = [
                     link for link in unique_links.values()
-                    if link.get("link") and link["link"] not in existing_links
+                    if link.get("link") and normalize_url(link["link"]) not in existing_links
                 ]
                 
                 provider_results[provider_name] = {
@@ -550,8 +554,9 @@ async def main():
     # Deduplicate all new links globally
     unique_new_links = {}
     for link_data in all_new_links:
-        link_url = link_data.get("link")
+        link_url = normalize_url(link_data.get("link", ""))
         if link_url and link_url not in unique_new_links:
+            link_data["link"] = link_url  # Store normalized URL
             unique_new_links[link_url] = link_data
     
     all_new_links = list(unique_new_links.values())
