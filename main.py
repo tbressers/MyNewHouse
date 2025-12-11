@@ -22,6 +22,7 @@ from price_extraction import parse_price_to_int, extract_price_from_text, extrac
 # Configure logging
 LOG_FILE = Path(__file__).resolve().parent / "logs/main.log"
 HOUSES_LOG_FILE = Path(__file__).resolve().parent / "logs/houses.json"
+EXCLUDE_PATTERNS_FILE = Path(__file__).resolve().parent / "logs/exclude.json"
 
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
@@ -100,30 +101,23 @@ PROVIDER_CONFIG = {
         # New: follow overview sub-pages and harvest detail links
         "follow_subpages": True,
         "subpage_follow_limit": 5,       # keep small to avoid crawl explosion
-        # Treat these as overview pages, not individual listings
-        "overview_patterns": [
-            r'/huurwoningen/',                                               # general listing root
-            r'/huurwoningen/[^/]+/(?:wijk-[^/]+/)?(?:appartement|kamer|studio|woning)/?$'
-        ],
         # HREFs that look like actual detail pages (anchors often have no innerText)
         "dom_link_href_allow": [
             r'/[a-z\-]+-te-huur/',                                           # e.g. /appartement-te-huur/
         ]
     },
     "kamernijmegen": {
-        "strict_filtering": False,       # News/nav heavy, try relaxed filtering
+        "strict_filtering": True,        # Avoid news/category pages
         "wait_for_js": False,
         "follow_subpages": False,
         "subpage_follow_limit": 0,
-        "overview_patterns": [],
         "dom_link_href_allow": []
     },
     "nymveste": {
-        "strict_filtering": False,
+        "strict_filtering": True,        # Avoid marketing pages
         "wait_for_js": False,
         "follow_subpages": False,
         "subpage_follow_limit": 0,
-        "overview_patterns": [],
         "dom_link_href_allow": []
     },
     "kbsvastgoedbeheer": {
@@ -131,7 +125,6 @@ PROVIDER_CONFIG = {
         "wait_for_js": False,
         "follow_subpages": False,
         "subpage_follow_limit": 0,
-        "overview_patterns": [],
         "dom_link_href_allow": []
     },
     "klikenhuur": {
@@ -139,7 +132,6 @@ PROVIDER_CONFIG = {
         "wait_for_js": False,
         "follow_subpages": False,
         "subpage_follow_limit": 0,
-        "overview_patterns": [],
         "dom_link_href_allow": []
     },
     "huurzone": {
@@ -147,7 +139,6 @@ PROVIDER_CONFIG = {
         "wait_for_js": False,
         "follow_subpages": False,
         "subpage_follow_limit": 0,
-        "overview_patterns": [],
         "dom_link_href_allow": []
     },
 }
@@ -158,24 +149,35 @@ def get_provider_name(url: str) -> str:
     domain = parsed.netloc.replace("www.", "").split(".")[0]
     return domain
 
-def is_overview_subpage(url: str, provider_name: str) -> bool:
-    """Detect provider-specific overview/listing pages that group multiple results."""
-    cfg = PROVIDER_CONFIG.get(provider_name, {})
-    patterns = cfg.get("overview_patterns", []) or []
+def load_exclude_patterns() -> List[re.Pattern]:
+    """Load exclusion patterns from logs/exclude.json and compile them."""
+    try:
+        if not EXCLUDE_PATTERNS_FILE.exists():
+            logger.warning(f"Exclude patterns file not found: {EXCLUDE_PATTERNS_FILE}")
+            return []
+        
+        with EXCLUDE_PATTERNS_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        patterns = []
+        for entry in data.get("patterns", []):
+            pattern_str = entry.get("pattern", "")
+            if pattern_str:
+                try:
+                    patterns.append(re.compile(pattern_str))
+                except re.error as e:
+                    logger.warning(f"Invalid regex pattern '{pattern_str}': {e}")
+        
+        logger.info(f"Loaded {len(patterns)} exclusion patterns from {EXCLUDE_PATTERNS_FILE}")
+        return patterns
+    
+    except Exception as e:
+        logger.error(f"Failed to load exclude patterns: {e}")
+        return []
 
-    if any(re.search(p, url) for p in patterns):
-        return True
-
-    # Generic fallbacks for Dutch rental portals
-    generic_overview = [
-        r'/huurwoningen(?:/|$)',                         # category trees
-        r'/for-rent(?:/|$)',
-        r'/kamer(?:s)?(?:/|$)$',                         # ends with type
-        r'/appartement(?:en)?(?:/|$)$',
-        r'/studio(?:s)?(?:/|$)$',
-        r'/woning(?:en)?(?:/|$)$'
-    ]
-    return any(re.search(p, url) for p in generic_overview)
+def is_overview_subpage(url: str, provider_name: str, exclude_patterns: List[re.Pattern]) -> bool:
+    """Detect overview/listing pages that group multiple results using exclude patterns."""
+    return any(pattern.search(url) for pattern in exclude_patterns)
 
 def extract_listing_links(html: str, base_url: str) -> Dict[str, Dict]:
     """
@@ -364,15 +366,16 @@ def filter_property_listings(links: List[Dict], strict: bool = True) -> List[Dic
     logger.info(f"Filtered to {len(filtered_links)} property listings (from {len(links)} total links)")
     return filtered_links
 
-async def scan_provider_with_retry(browser, url: str, max_retries: int = 2, save_html_dir: str = None) -> tuple[str, List[Dict]]:
+async def scan_provider_with_retry(browser, url: str, exclude_patterns: List[re.Pattern], save_html_dir: str = None, max_retries: int = 2) -> tuple[str, List[Dict]]:
     """
     Scan a provider URL with automatic retry on failure.
     
     Args:
         browser: Playwright browser instance
         url: Provider URL to scan
-        max_retries: Maximum number of retry attempts (default: 2)
+        exclude_patterns: Compiled regex patterns for URL exclusion
         save_html_dir: Optional directory to save HTML output for debugging
+        max_retries: Maximum number of retry attempts (default: 2)
     
     Returns:
         Tuple of (provider_name, list_of_links)
@@ -381,7 +384,7 @@ async def scan_provider_with_retry(browser, url: str, max_retries: int = 2, save
     
     for attempt in range(max_retries):
         try:
-            return await scan_provider(browser, url, save_html_dir=save_html_dir)
+            return await scan_provider(browser, url, exclude_patterns, save_html_dir=save_html_dir)
         except Exception as e:
             if attempt < max_retries - 1:
                 wait_time = 2 ** attempt  # 1s, then 2s
@@ -393,7 +396,7 @@ async def scan_provider_with_retry(browser, url: str, max_retries: int = 2, save
     
     return provider_name, []
 
-async def scan_provider(browser, url: str, save_html_dir: str = None) -> tuple[str, List[Dict]]:
+async def scan_provider(browser, url: str, exclude_patterns: List[re.Pattern], save_html_dir: str = None) -> tuple[str, List[Dict]]:
     """
     Scan a provider URL and extract housing listing links.
     Returns (provider_name, list_of_links_with_metadata)
@@ -542,7 +545,7 @@ async def scan_provider(browser, url: str, save_html_dir: str = None) -> tuple[s
 
         # NEW: Follow a small number of overview sub-pages and harvest their listing links
         if config.get("follow_subpages"):
-            subpages = [u for u in list(all_links.keys()) if is_overview_subpage(u, provider_name)]
+            subpages = [u for u in list(all_links.keys()) if is_overview_subpage(u, provider_name, exclude_patterns)]
             limit = int(config.get("subpage_follow_limit", 0))
             visited = set()
             for idx, sub_url in enumerate(subpages[:limit]):
@@ -585,7 +588,7 @@ async def scan_provider(browser, url: str, save_html_dir: str = None) -> tuple[s
         # Remove overview pages from candidates before filtering
         candidate_links = [
             link for link in all_links.values()
-            if not is_overview_subpage(link.get("link", ""), provider_name)
+            if not is_overview_subpage(link.get("link", ""), provider_name, exclude_patterns)
         ]
 
         # Filter links to property listings FIRST (before fetching prices from pages)
@@ -648,8 +651,38 @@ async def main():
         set_dry_run_mode(True)
         logger.info("Running in DRY-RUN mode - no Pushover notifications will be sent")
     
-    # Load existing links
+    # Load exclude patterns
+    exclude_patterns = load_exclude_patterns()
+    
+    # Load existing links and records
     existing_links = load_existing_links()
+    houses_log_data: List[Dict] = []
+    if HOUSES_LOG_FILE.exists():
+        try:
+            with HOUSES_LOG_FILE.open("r", encoding="utf-8") as f:
+                houses_log_data = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to read houses.json: {e}")
+            houses_log_data = []
+
+    # Prune existing records that match exclusion patterns (e.g., overview pages)
+    pruned_out = 0
+    if houses_log_data:
+        filtered_log = []
+        for item in houses_log_data:
+            link_val = item.get("link", "")
+            if link_val and any(p.search(link_val) for p in exclude_patterns):
+                pruned_out += 1
+                continue
+            filtered_log.append(item)
+        if pruned_out:
+            houses_log_data = filtered_log
+            logger.info(f"Pruned {pruned_out} existing records matching exclusion patterns")
+
+    existing_link_map: Dict[str, Dict] = {
+        item.get("link", ""): item for item in houses_log_data if item.get("link")
+    }
+    updated_existing = 0
     logger.info(f"Starting scan with {len(existing_links)} known links")
     
     # Filter providers if specific one requested
@@ -674,7 +707,7 @@ async def main():
             browser = await pw.chromium.launch(headless=True)
             
             for url in urls_to_scan:
-                provider_name, links = await scan_provider_with_retry(browser, url, save_html_dir=args.save_html)
+                provider_name, links = await scan_provider_with_retry(browser, url, exclude_patterns, save_html_dir=args.save_html)
                 
                 # Deduplicate links from this provider
                 unique_links = {}
@@ -682,6 +715,18 @@ async def main():
                     link_url = link_data.get("link")
                     if link_url and link_url not in unique_links:
                         unique_links[link_url] = link_data
+
+                    # If we already stored this link earlier but price was missing, backfill it
+                    if link_url and link_url in existing_link_map:
+                        existing_item = existing_link_map[link_url]
+                        if (not existing_item.get("price")) and link_data.get("price"):
+                            existing_item["price"] = link_data.get("price")
+                            # Optionally refresh title/date if missing
+                            if not existing_item.get("title") and link_data.get("title"):
+                                existing_item["title"] = link_data.get("title")
+                            if not existing_item.get("date") and link_data.get("date"):
+                                existing_item["date"] = link_data.get("date")
+                            updated_existing += 1
                 
                 # Find new links
                 new_links = [
@@ -701,7 +746,7 @@ async def main():
             await browser.close()
     
     except Exception as e:
-        logger.error(f"Fatal error during scan: {e}")
+        logger.error(f"Fatal error during scan: {e}", exc_info=True)
         return
     
     # Deduplicate all new links globally
@@ -713,16 +758,12 @@ async def main():
     
     all_new_links = list(unique_new_links.values())
     
-    # Save new links to houses.json
-    if all_new_links:
+    # Save updates to houses.json (new links or backfilled/pruned records)
+    if all_new_links or updated_existing or pruned_out:
         try:
             HOUSES_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-            houses_log = []
-            
-            if HOUSES_LOG_FILE.exists():
-                with HOUSES_LOG_FILE.open("r", encoding="utf-8") as f:
-                    houses_log = json.load(f)
-            
+            houses_log = houses_log_data  # reuse and include any backfilled prices
+
             timestamp = datetime.now(timezone.utc).isoformat()
             
             # Add new links
