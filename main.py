@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import List, Dict, Set
 from logging.handlers import RotatingFileHandler
 from urllib.parse import urljoin, urlparse
+import re
 
 from playwright.async_api import async_playwright
 from pushover_utils import send_info_notification, set_dry_run_mode
@@ -137,8 +138,6 @@ def is_property_listing(title: str, url: str, strict: bool = True) -> bool:
     2. Location indicators (city name or "te", "in", etc.)
     3. Property indicators (size m², price €, property type)
     """
-    import re
-    
     title = title.strip()
     url = url.lower()
     
@@ -219,6 +218,56 @@ def filter_property_listings(links: List[Dict], strict: bool = True) -> List[Dic
     logger.info(f"Filtered to {len(filtered_links)} property listings (from {len(links)} total links)")
     return filtered_links
 
+def extract_price_from_text(text: str) -> str:
+    """
+    Extract price from text using regex patterns.
+    Matches: €500, €500,-, €500.00, €1.200, €1,200.50, etc.
+    
+    Returns the matched price string or empty string if not found.
+    """
+    # Pattern matches: € followed by digits, with optional separators (. , or -) and decimals
+    # Examples: €500, €500,-, €1.200, €1,200.50, €500.00
+    price_pattern = r'€\s*[\d.,]+'
+    match = re.search(price_pattern, text)
+    if match:
+        return match.group(0).strip()
+    return ""
+
+async def extract_price_from_page(browser, url: str) -> str:
+    """
+    Open a URL and extract the first price found on the page.
+    
+    Args:
+        browser: Playwright browser instance
+        url: URL to open
+    
+    Returns:
+        Price string if found, empty string otherwise
+    """
+    context = None
+    try:
+        context = await browser.new_context()
+        page = await context.new_page()
+        
+        await page.goto(url, wait_until="networkidle", timeout=10000)
+        html = await page.content()
+        
+        # Extract price from page HTML
+        price = extract_price_from_text(html)
+        if price:
+            logger.debug(f"Extracted price from {url}: {price}")
+            return price
+        
+        return ""
+    
+    except Exception as e:
+        logger.debug(f"Failed to extract price from page {url}: {e}")
+        return ""
+    
+    finally:
+        if context:
+            await context.close()
+
 def extract_listing_links(html: str, base_url: str) -> Dict[str, Dict]:
     """
     Extract all links from HTML.
@@ -257,6 +306,10 @@ def extract_listing_links(html: str, base_url: str) -> Dict[str, Dict]:
                 # Keep all links, let LLM decide
                 if title:  # Only if there's some text
                     self.listing_data["title"] = title
+                    # Extract price from title
+                    price = extract_price_from_text(title)
+                    if price:
+                        self.listing_data["price"] = price
                     links_data[self.listing_data["link"]] = self.listing_data
                 
                 self.listing_data = {}
@@ -440,6 +493,16 @@ async def scan_provider(browser, url: str, save_html_dir: str = None) -> tuple[s
                 break
         
         logger.info(f"{provider_name}: total {len(all_links)} links after pagination")
+        
+        # Extract missing prices from individual listing pages
+        links_needing_price = [link for link in all_links.values() if not link.get("price")]
+        if links_needing_price:
+            logger.info(f"{provider_name}: extracting prices from {len(links_needing_price)} listing pages")
+            for link_data in links_needing_price:
+                price = await extract_price_from_page(browser, link_data.get("link", ""))
+                if price:
+                    link_data["price"] = price
+                await asyncio.sleep(0.2)  # Rate limiting
         
         # Filter links to property listings only, using provider-specific strict mode
         strict_filtering = config.get("strict_filtering", True)
