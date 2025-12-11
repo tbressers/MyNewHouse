@@ -593,7 +593,7 @@ async def main():
     if message_parts:
         message = "\n".join(message_parts)
         logger.info(f"Found {total_new} new listings total")
-        send_info_notification(message, context="New house offers")
+        send_info_notification(message)
     else:
         logger.info("No new listings found")
 

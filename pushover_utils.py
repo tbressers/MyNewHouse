@@ -40,28 +40,43 @@ def _split_message(message: str, max_length: int = 512, max_chunks: int = 5) -> 
     
     chunks = []
     remaining = message
+    url_pattern = r'https?://\S+'
     
     while remaining and len(chunks) < max_chunks:
         if len(remaining) <= max_length:
             chunks.append(remaining)
             break
         
-        # Find the last URL in the first max_length characters
         chunk = remaining[:max_length]
-        url_pattern = r'https?://\S+'
-        urls_in_chunk = list(re.finditer(url_pattern, chunk))
         
-        if urls_in_chunk:
-            # Split right after the last URL
-            last_url = urls_in_chunk[-1]
+        # Find all URLs in the entire remaining text (not just chunk)
+        urls_in_remaining = list(re.finditer(url_pattern, remaining))
+        
+        # Find URLs that start before max_length
+        urls_before_limit = [url for url in urls_in_remaining if url.start() < max_length]
+        
+        if urls_before_limit:
+            # Use the last URL that starts before the limit, but include its full length
+            last_url = urls_before_limit[-1]
             split_pos = last_url.end()
-            chunks.append(remaining[:split_pos])
-            remaining = remaining[split_pos:].lstrip()
+            
+            # Only split here if it doesn't exceed max_length by too much (allow 50 chars for URL overage)
+            if split_pos <= max_length + 50:
+                chunks.append(remaining[:split_pos])
+                remaining = remaining[split_pos:].lstrip()
+            else:
+                # URL is too long, split at max_length at word boundary
+                split_pos = max_length
+                last_space = chunk.rfind(' ')
+                if last_space > max_length * 0.7:
+                    split_pos = last_space + 1
+                chunks.append(remaining[:split_pos])
+                remaining = remaining[split_pos:].lstrip()
         else:
             # No URL found, split at max_length at word boundary if possible
             split_pos = max_length
             last_space = chunk.rfind(' ')
-            if last_space > max_length * 0.7:  # Only use space if it's reasonably close
+            if last_space > max_length * 0.7:
                 split_pos = last_space + 1
             chunks.append(remaining[:split_pos])
             remaining = remaining[split_pos:].lstrip()
@@ -110,6 +125,7 @@ def send_error_notification(error_message: str, context: str = "MyNewHouse Error
             
             response = conn.getresponse()
             response_data = response.read().decode()
+            conn.close()
             
             if response.status == 200:
                 logger.info(f"Pushover error notification sent successfully (part {i+1}/{len(message_chunks)})")
