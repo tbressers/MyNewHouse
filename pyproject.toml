@@ -7,4 +7,5 @@ requires-python = ">=3.12"
 dependencies = [
     "playwright>=1.56.0",
     "python-dotenv>=1.2.1",
+    "openai>=1.0.0",
 ]

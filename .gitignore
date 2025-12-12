@@ -15,3 +15,4 @@ cron.log
 *.log
 logs/
 debug_html/
+nohup.out
