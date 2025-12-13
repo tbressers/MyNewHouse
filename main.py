@@ -54,7 +54,6 @@ PROVIDER_URLS = [
     "https://studentensteden.nl/nijmegen/kamers",
     "https://www.pararius.nl/huurwoningen/nijmegen/studentenhuisvesting",
     "https://www.kamernijmegen.com/",
-    "https://nymveste.nl/studentenkamer-nijmegen-lingewaard",
     "https://kbsvastgoedbeheer.nl/aanbod/",
     "https://www.klikenhuur.nl/woning-overzicht?cityOrPostalcode=nijmegen&page=1&pagesize=12",
 ]
