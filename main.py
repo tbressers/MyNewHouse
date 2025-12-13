@@ -57,7 +57,6 @@ PROVIDER_URLS = [
     "https://nymveste.nl/studentenkamer-nijmegen-lingewaard",
     "https://kbsvastgoedbeheer.nl/aanbod/",
     "https://www.klikenhuur.nl/woning-overzicht?cityOrPostalcode=nijmegen&page=1&pagesize=12",
-    "https://www.huurzone.nl/huurwoningen/nijmegen?utm_source=daisycon&utm_medium=affiliate&utm_campaign=daisycon_NijmegenStudentenstad.nl"
 ]
 
 
@@ -144,7 +143,7 @@ async def extract_listings_from_page(page: Page, scan_record: Dict[str, Any]) ->
         scan_record: Record with extraction_rules
         
     Returns:
-        List of house dictionaries with title, url, price, street
+        List of house dictionaries with title, url, price, address
     """
     rules = scan_record.get("extraction_rules", {})
     if not rules:
@@ -186,19 +185,17 @@ async def extract_listings_from_page(page: Page, scan_record: Dict[str, Any]) ->
                         const priceEl = container.querySelector(rules.price.selector);
                         if (priceEl) {
                             listing.price_text = priceEl.innerText.trim();
-                        }
                     }
-                    
-                    // Extract street (optional)
-                    if (rules.street && rules.street.selector) {
-                        const streetEl = container.querySelector(rules.street.selector);
-                        if (streetEl) {
-                            const attr = rules.street.attribute || 'text';
-                            listing.street = attr === 'text' ? streetEl.innerText.trim() : streetEl.getAttribute(attr);
-                        }
+                }
+                
+                // Extract address (optional)
+                if (rules.address && rules.address.selector) {
+                    const addressEl = container.querySelector(rules.address.selector);
+                    if (addressEl) {
+                        const attr = rules.address.attribute || 'text';
+                        listing.address = attr === 'text' ? addressEl.innerText.trim() : addressEl.getAttribute(attr);
                     }
-                    
-                    // Only add if we have at least a URL
+                }                    // Only add if we have at least a URL
                     if (listing.url) {
                         results.push(listing);
                     }
@@ -223,11 +220,46 @@ async def extract_listings_from_page(page: Page, scan_record: Dict[str, Any]) ->
                 url = urljoin(page.url, url)
                 url = normalize_url(url)
             
+            # Extract address from URL if configured
+            address = listing.get("address", "")
+            if not address and rules.get("address", {}).get("extract_from_url"):
+                url_instructions = rules["address"].get("url_instructions", "")
+                if url_instructions and url:
+                    # Parse URL to get path segments
+                    from urllib.parse import urlparse
+                    parsed = urlparse(url)
+                    path_segments = [s for s in parsed.path.split('/') if s]
+                    
+                    # Extract based on instructions
+                    if path_segments:
+                        # Common patterns from instructions
+                        if "last path segment" in url_instructions.lower():
+                            address = path_segments[-1]
+                        elif "second-to-last" in url_instructions.lower() or "second to last" in url_instructions.lower():
+                            address = path_segments[-2] if len(path_segments) >= 2 else ""
+                        elif "third-to-last" in url_instructions.lower():
+                            address = path_segments[-3] if len(path_segments) >= 3 else ""
+                        elif "after city" in url_instructions.lower():
+                            # Look for city name in segments
+                            city_lower = scan_record.get("city", "").lower()
+                            try:
+                                city_idx = next(i for i, seg in enumerate(path_segments) if city_lower in seg.lower())
+                                if city_idx + 1 < len(path_segments):
+                                    address = path_segments[city_idx + 1]
+                            except StopIteration:
+                                pass
+                        
+                        if address:
+                            # Clean up the address
+                            address = address.replace('-', ' ').replace('_', ' ').strip()
+                            # Capitalize properly
+                            address = ' '.join(word.capitalize() for word in address.split())
+            
             processed_listings.append({
                 "title": listing.get("title", ""),
                 "link": url,
                 "price": price if price > 0 else None,
-                "street": listing.get("street", "")
+                "address": address
             })
         
         logger.info(f"Extracted {len(processed_listings)} listings from page")
@@ -487,7 +519,7 @@ async def main():
                     "link": link_data.get("link", ""),
                     "title": link_data.get("title", ""),
                     "price": link_data.get("price"),
-                    "street": link_data.get("street", ""),
+                    "address": link_data.get("address", ""),
                     "city": city
                 })
             

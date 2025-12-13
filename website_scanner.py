@@ -319,10 +319,10 @@ Respond with JSON: {{"link": "URL", "reason": "explanation"}}
         Analyze the listing page to determine how to extract house information.
         
         Returns:
-            Dict with extraction rules: selectors/patterns for title, url, price, street
+            Dict with extraction rules: selectors/patterns for title, url, price, address
         """
         try:
-            # Get page HTML structure
+            # Get page HTML structure with URLs
             html_sample = await page.evaluate("""
                 () => {
                     // Find the first few listing items
@@ -340,10 +340,15 @@ Respond with JSON: {{"link": "URL", "reason": "explanation"}}
                         const items = Array.from(document.querySelectorAll(selector));
                         if (items.length >= 3) {
                             // Get first 2 items as examples
-                            return items.slice(0, 2).map(item => ({
-                                html: item.outerHTML.substring(0, 2000),
-                                text: item.innerText.substring(0, 500)
-                            }));
+                            return items.slice(0, 2).map(item => {
+                                // Find the main link in this item
+                                const link = item.querySelector('a[href]');
+                                return {
+                                    html: item.outerHTML.substring(0, 2000),
+                                    text: item.innerText.substring(0, 500),
+                                    url: link ? link.href : ''
+                                };
+                            });
                         }
                     }
                     return [];
@@ -360,14 +365,24 @@ Respond with JSON: {{"link": "URL", "reason": "explanation"}}
 Website: {self.website_url}
 Listing Page: {page.url}
 
-Sample listings:
+Sample listings (with their actual URLs):
 {json.dumps(html_sample, indent=2)}
 
 Task: Create CSS selectors or patterns to extract the following from each listing:
 1. Title (house/apartment name or description)
 2. URL (link to full listing)
 3. Price (as integer, e.g., €800 per month)
-4. Street name (if available in the listing)
+4. Address/street name - IMPORTANT: Look at both the HTML content AND the sample URLs above
+
+For the address field, you have multiple options:
+a) If the address is visible in the HTML text: provide a CSS selector
+b) If the address is in the URL (look at the sample URLs!): 
+   - Set "extract_from_url" to true
+   - Provide "url_instructions" explaining how to extract it (e.g., "last path segment", "second-to-last segment", "segment after city name")
+   - Examples:
+     * URL: /nijmegen/39b3bfca/heeskesacker => "last path segment is the address"
+     * URL: /huis-te-huur/amsterdam/van-breestraat => "last path segment is the address"
+c) If address is not reliably available: set optional to true and leave selector empty
 
 Respond in JSON format:
 {{
@@ -375,10 +390,16 @@ Respond in JSON format:
     "title": {{"selector": "CSS selector relative to container", "attribute": "text or attribute name"}},
     "url": {{"selector": "CSS selector for link", "attribute": "href"}},
     "price": {{"selector": "CSS selector for price", "pattern": "regex to extract number"}},
-    "street": {{"selector": "CSS selector for address/street", "attribute": "text", "optional": true}}
+    "address": {{
+        "selector": "CSS selector for address/street (if in HTML, otherwise empty string)", 
+        "attribute": "text",
+        "extract_from_url": true/false,
+        "url_instructions": "human-readable description of how to extract from URL (if extract_from_url is true)",
+        "optional": true
+    }}
 }}
 
-Be specific and use the actual class names and structure you see in the HTML.
+Be specific and use the actual class names and structure you see in the HTML and URLs.
 """
             
             extraction_rules = await self._call_llm(analysis_prompt)
