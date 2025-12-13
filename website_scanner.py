@@ -104,6 +104,32 @@ class WebsiteScanner:
             finally:
                 await browser.close()
     
+    async def _prepare_page(self, page: Page) -> None:
+        """Dismiss common overlays and wait for dynamic content to load."""
+        try:
+            # Try to dismiss cookie/consent banners
+            for selector in [
+                "button:has-text('Accept')",
+                "button:has-text('Accepteren')",
+                "button:has-text('Allow')",
+                "[class*='cookie'][class*='close']",
+                "[aria-label='Close']"
+            ]:
+                try:
+                    btn = await page.query_selector(selector)
+                    if btn:
+                        await btn.click(timeout=2000)
+                        await page.wait_for_timeout(500)
+                        logger.debug("Dismissed overlay")
+                        break
+                except:
+                    pass
+            
+            # Wait a bit more for JS frameworks to render
+            await page.wait_for_timeout(1000)
+        except Exception as e:
+            logger.debug(f"Error preparing page: {e}")
+    
     async def _find_listing_page(self, page: Page) -> Optional[str]:
         """
         Use LLM to navigate the website and find the listing page for the city.
@@ -114,7 +140,7 @@ class WebsiteScanner:
         try:
             # Load the homepage
             await page.goto(self.website_url, wait_until='networkidle', timeout=30000)
-            await asyncio.sleep(2)  # Let any dynamic content load
+            await self._prepare_page(page)
             
             # Check if current page already shows listings (verify before asking LLM)
             is_already_listing_page = await self._verify_listing_page(page)
@@ -163,7 +189,7 @@ Respond in JSON format:
                 
                 # Navigate to the recommended page
                 await page.goto(absolute_url, wait_until='networkidle', timeout=30000)
-                await asyncio.sleep(2)
+                await self._prepare_page(page)
                 
                 # Verify this looks like a listing page
                 is_listing_page = await self._verify_listing_page(page)
@@ -263,6 +289,10 @@ Respond with JSON: {{"link": "URL", "reason": "explanation"}}
     async def _verify_listing_page(self, page: Page) -> bool:
         """Check if the current page appears to be a listing page."""
         try:
+            # Try scrolling to trigger lazy-loading
+            await page.evaluate("window.scrollBy(0, 500)")
+            await page.wait_for_timeout(500)
+            
             # Look for multiple property listings on the page
             listing_count = await page.evaluate("""
                 () => {
@@ -276,7 +306,10 @@ Respond with JSON: {{"link": "URL", "reason": "explanation"}}
                         '[data-testid*="listing"]',
                         'article',
                         '.result-item',
-                        '.search-result'
+                        '.search-result',
+                        'a[href*="kamer"]',
+                        'a[href*="woning"]',
+                        'a[href*="property"]'
                     ];
                     
                     let maxCount = 0;
@@ -330,6 +363,10 @@ Respond with JSON: {{"link": "URL", "reason": "explanation"}}
             Dict with extraction rules: selectors/patterns for title, url, price, address
         """
         try:
+            # Scroll to trigger lazy-loading
+            await page.evaluate("window.scrollBy(0, 1000)")
+            await page.wait_for_timeout(1000)
+            
             # Get page HTML structure with URLs
             html_sample = await page.evaluate("""
                 () => {
@@ -341,7 +378,10 @@ Respond with JSON: {{"link": "URL", "reason": "explanation"}}
                         '[class*="woning"]',
                         '[class*="kamer"]',
                         'article',
-                        '.result-item'
+                        '.result-item',
+                        'a[href*="kamer"]',
+                        'a[href*="woning"]',
+                        'a[href*="property"]'
                     ];
                     
                     for (const selector of selectors) {
@@ -350,7 +390,7 @@ Respond with JSON: {{"link": "URL", "reason": "explanation"}}
                             // Get first 2 items as examples
                             return items.slice(0, 2).map(item => {
                                 // Find the main link in this item
-                                const link = item.querySelector('a[href]');
+                                const link = item.tagName === 'A' ? item : item.querySelector('a[href]');
                                 return {
                                     html: item.outerHTML.substring(0, 2000),
                                     text: item.innerText.substring(0, 500),
