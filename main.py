@@ -51,7 +51,7 @@ PROVIDER_URLS = [
     "https://kamernet.nl/en/for-rent/student-housing-nijmegen",
     "https://mijn.sshn.nl/nl-NL/",
     "https://www.wibeco.nl/verhuur/studentenkamers-nijmegen/",
-    "https://nijmegenstudentenstad.nl/kamers-in-nijmegen",
+    "https://studentensteden.nl/nijmegen/kamers",
     "https://www.pararius.nl/huurwoningen/nijmegen/studentenhuisvesting",
     "https://www.kamernijmegen.com/",
     "https://nymveste.nl/studentenkamer-nijmegen-lingewaard",
@@ -172,11 +172,17 @@ async def extract_listings_from_page(page: Page, scan_record: Dict[str, Any]) ->
                     }
                     
                     // Extract URL
-                    if (rules.url && rules.url.selector) {
-                        const urlEl = container.querySelector(rules.url.selector);
-                        if (urlEl) {
+                    if (rules.url) {
+                        if (rules.url.selector) {
+                            const urlEl = container.querySelector(rules.url.selector);
+                            if (urlEl) {
+                                const attr = rules.url.attribute || 'href';
+                                listing.url = attr === 'href' ? urlEl.href : urlEl.getAttribute(attr);
+                            }
+                        } else {
+                            // If no selector, use container itself (when container is <a> tag)
                             const attr = rules.url.attribute || 'href';
-                            listing.url = attr === 'href' ? urlEl.href : urlEl.getAttribute(attr);
+                            listing.url = attr === 'href' ? container.href : container.getAttribute(attr);
                         }
                     }
                     
@@ -359,6 +365,30 @@ async def scan_provider(browser: Browser, provider_url: str, city: str) -> tuple
             # Extract listings
             listings = await extract_listings_from_page(page, scan_record)
             
+            # Debug: if no listings found, log the container selector issue
+            if not listings:
+                rules = scan_record.get("extraction_rules", {})
+                container_selector = rules.get("container_selector", "")
+                logger.warning(f"{provider_name}: No listings extracted. Testing container selector: {container_selector}")
+                try:
+                    debug_info = await page.evaluate(f"""
+                        (selector) => {{
+                            const containers = Array.from(document.querySelectorAll(selector));
+                            return {{
+                                count: containers.length,
+                                samples: containers.slice(0, 2).map(el => ({{
+                                    html: el.outerHTML.substring(0, 500),
+                                    text: el.innerText.substring(0, 200)
+                                }}))
+                            }};
+                        }}
+                    """, container_selector)
+                    logger.warning(f"{provider_name}: Container selector matches {debug_info['count']} elements")
+                    if debug_info['samples']:
+                        logger.warning(f"{provider_name}: Sample container text: {debug_info['samples'][0]['text'][:150]}")
+                except Exception as e:
+                    logger.warning(f"{provider_name}: Error testing container selector: {e}")
+            
             # Tag with city
             for listing in listings:
                 listing["city"] = city
@@ -398,6 +428,7 @@ async def main():
     parser.add_argument("--debug", action="store_true", help="Enable DEBUG logging")
     parser.add_argument("--provider", type=str, help="Scan only a specific provider (by name or URL)")
     parser.add_argument("--rescan", action="store_true", help="Force rescan of website structures (ignore existing scan records)")
+    parser.add_argument("--test", action="store_true", help="Test mode: skip loading existing data, show extracted listings immediately")
     args = parser.parse_args()
     
     if args.debug:
@@ -419,12 +450,12 @@ async def main():
                 logger.error(f"Error clearing provider templates: {e}")
     
     # Load existing links
-    existing_links = load_existing_links()
+    existing_links = load_existing_links() if not args.test else set()
     logger.info(f"Starting scan with {len(existing_links)} known links")
     
     # Load all existing data
     houses_log_data: List[Dict] = []
-    if HOUSES_LOG_FILE.exists():
+    if HOUSES_LOG_FILE.exists() and not args.test:
         try:
             with HOUSES_LOG_FILE.open("r", encoding="utf-8") as f:
                 houses_log_data = json.load(f)
@@ -461,6 +492,20 @@ async def main():
                 for url in urls_to_scan:
                     provider_name, listings = await scan_provider(browser, url, city)
                     
+                    # In test mode, show extracted listings immediately
+                    if args.test:
+                        logger.info(f"\n{'='*60}")
+                        logger.info(f"TEST MODE - {provider_name} extracted {len(listings)} listings:")
+                        logger.info(f"{'='*60}")
+                        for i, listing in enumerate(listings[:5], 1):  # Show first 5
+                            logger.info(f"{i}. {listing.get('title', 'No title')[:60]}")
+                            logger.info(f"   URL: {listing.get('link', 'No URL')}")
+                            logger.info(f"   Price: €{listing.get('price', 'N/A')}")
+                            logger.info(f"   Address: {listing.get('address', 'N/A')}")
+                        if len(listings) > 5:
+                            logger.info(f"... and {len(listings) - 5} more")
+                        logger.info("")
+                    
                     # Find new listings
                     new_listings = []
                     for listing in listings:
@@ -496,7 +541,7 @@ async def main():
     all_new_links = list(unique_new_links.values())
     
     # Save updates to houses.json
-    if all_new_links:
+    if all_new_links and not args.test:
         try:
             HOUSES_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
             

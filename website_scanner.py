@@ -82,10 +82,12 @@ class WebsiteScanner:
                     return None
                 
                 # Step 3: Create record
+                parsed = urlparse(self.website_url)
+                base_url = f"{parsed.scheme}://{parsed.netloc}"
                 record = {
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                     "city": self.city,
-                    "base_url": self.website_url,
+                    "base_url": base_url,
                     "listing_page_url": listing_page_url,
                     "extraction_rules": extraction_rules
                 }
@@ -113,6 +115,12 @@ class WebsiteScanner:
             # Load the homepage
             await page.goto(self.website_url, wait_until='networkidle', timeout=30000)
             await asyncio.sleep(2)  # Let any dynamic content load
+            
+            # Check if current page already shows listings (verify before asking LLM)
+            is_already_listing_page = await self._verify_listing_page(page)
+            if is_already_listing_page:
+                logger.info(f"The starting URL already appears to be a listing page!")
+                return page.url
             
             # Get page content and visible links
             html_content = await page.content()
