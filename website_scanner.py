@@ -476,6 +476,8 @@ Respond with JSON: {{"link": "URL", "reason": "explanation"}}
                 () => {
                     // Find the first few listing items
                     const selectors = [
+                        '[class*="search-result"]',
+                        '[class*="SearchResult"]',
                         '[class*="listing"]',
                         '[class*="property"]',
                         '[class*="house"]',
@@ -483,18 +485,29 @@ Respond with JSON: {{"link": "URL", "reason": "explanation"}}
                         '[class*="kamer"]',
                         'article',
                         '.result-item',
+                        '[class*="card"]',
+                        '[class*="tile"]',
                         'a[href*="kamer"]',
                         'a[href*="woning"]',
-                        'a[href*="property"]'
+                        'a[href*="property"]',
+                        'a[href*="rent"]',
+                        'a[href*="huur"]'
                     ];
                     
                     for (const selector of selectors) {
-                        const items = Array.from(document.querySelectorAll(selector));
+                        const allItems = Array.from(document.querySelectorAll(selector));
+                        
+                        // Filter items that have a link and some text content
+                        const items = allItems.filter(item => {
+                            const link = item.tagName === 'A' ? item : item.querySelector('a');
+                            return link && item.innerText.trim().length > 20;
+                        });
+
                         if (items.length >= 3) {
                             // Get first 2 items as examples
                             return items.slice(0, 2).map(item => {
                                 // Find the main link in this item
-                                const link = item.tagName === 'A' ? item : item.querySelector('a[href]');
+                                const link = item.tagName === 'A' ? item : item.querySelector('a');
                                 return {
                                     html: item.outerHTML.substring(0, 2000),
                                     text: item.innerText.substring(0, 500),
@@ -515,9 +528,11 @@ Respond with JSON: {{"link": "URL", "reason": "explanation"}}
                 fallback_sample = await page.evaluate("""
                     () => {
                         const links = Array.from(document.querySelectorAll('a'));
-                        const rentalPatterns = /huur|rent|kamer|room|woning|house|appartement|apartment|verhuur/i;
+                        const rentalPatterns = /huur|rent|kamer|room|woning|house|appartement|apartment|verhuur|aanbod/i;
                         const rentalLinks = links.filter(a => 
-                            rentalPatterns.test(a.href) && a.href.includes('http')
+                            (rentalPatterns.test(a.href) || rentalPatterns.test(a.innerText)) && 
+                            a.href.includes('http') &&
+                            a.innerText.trim().length > 10
                         );
                         
                         if (rentalLinks.length >= 3) {
