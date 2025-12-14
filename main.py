@@ -321,16 +321,13 @@ def extract_price_from_text(text: str) -> int:
     if not text:
         return 0
     
-    # Remove common non-numeric characters
-    text = text.replace(',', '').replace('.', '')
-    
-    # Look for patterns like: €800, 800€, EUR 800, 800 per month, etc.
+    # Look for patterns like: €800, 800€, EUR 800, 800 per month, €330.38, €1,052, etc.
     patterns = [
-        r'€\s*(\d+)',
-        r'(\d+)\s*€',
-        r'EUR\s*(\d+)',
-        r'(\d+)\s*EUR',
-        r'(\d+)\s*(?:per|p/m|pm)',
+        r'€\s*([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2})?)',  # €800 or €1,052 or €800.00
+        r'([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2})?)\s*€',  # 800€ or 1,052€
+        r'EUR\s*([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2})?)',  # EUR 800
+        r'([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2})?)\s*EUR',  # 800 EUR
+        r'([0-9]{1,3}(?:[.,][0-9]{3})*(?:[.,][0-9]{2})?)\s*(?:per|p/m|pm)',  # 800 per month
         r'(\d{3,})'  # Fallback: any 3+ digit number
     ]
     
@@ -338,7 +335,39 @@ def extract_price_from_text(text: str) -> int:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             try:
-                price = int(match.group(1))
+                # Extract the matched price string
+                price_str = match.group(1)
+                
+                # Clean up: remove thousand separators (comma or dot when followed by 3 digits)
+                # Keep only the integer part (ignore decimal cents)
+                price_clean = price_str
+                
+                # If contains both comma and dot, determine which is decimal separator
+                if ',' in price_clean and '.' in price_clean:
+                    # Whichever comes last is the decimal separator
+                    if price_clean.rindex(',') > price_clean.rindex('.'):
+                        # Comma is decimal, dot is thousands
+                        price_clean = price_clean.replace('.', '').split(',')[0]
+                    else:
+                        # Dot is decimal, comma is thousands
+                        price_clean = price_clean.replace(',', '').split('.')[0]
+                elif ',' in price_clean:
+                    # Only comma - check if it's thousands or decimal
+                    parts = price_clean.split(',')
+                    if len(parts[-1]) == 2:  # Decimal separator (e.g., 595,00)
+                        price_clean = parts[0]
+                    else:  # Thousands separator (e.g., 1,052)
+                        price_clean = price_clean.replace(',', '')
+                elif '.' in price_clean:
+                    # Only dot - check if it's thousands or decimal
+                    parts = price_clean.split('.')
+                    if len(parts[-1]) == 2:  # Decimal separator (e.g., 595.00)
+                        price_clean = parts[0]
+                    else:  # Thousands separator (e.g., 1.052)
+                        price_clean = price_clean.replace('.', '')
+                
+                price = int(price_clean)
+                
                 # Sanity check: price should be between 200 and 5000
                 if 200 <= price <= 5000:
                     return price

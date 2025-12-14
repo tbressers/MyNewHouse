@@ -109,7 +109,7 @@ class WebsiteScanner:
     async def _prepare_page(self, page: Page) -> None:
         """Dismiss common overlays and wait for dynamic content to load."""
         try:
-            # Try to dismiss cookie/consent banners
+                # Try to dismiss cookie/consent banners
             for selector in [
                 "button:has-text('Accept')",
                 "button:has-text('Accepteren')",
@@ -127,8 +127,14 @@ class WebsiteScanner:
                 except:
                     pass
             
-            # Wait a bit more for JS frameworks to render
-            await page.wait_for_timeout(1000)
+            # Wait longer for JS frameworks to render (some sites load content dynamically)
+            await page.wait_for_timeout(2000)
+            
+            # Check if page content loaded properly by looking for links
+            link_count = await page.evaluate("() => document.querySelectorAll('a').length")
+            if link_count < 5:
+                logger.warning("Page may not have loaded properly, waiting longer...")
+                await page.wait_for_timeout(3000)
         except Exception as e:
             logger.debug(f"Error preparing page: {e}")
     
@@ -196,6 +202,27 @@ Respond in JSON format:
                 # Verify this looks like a listing page
                 is_listing_page = await self._verify_listing_page(page)
                 if is_listing_page:
+                    return page.url
+                
+                logger.warning(f"LLM recommendation didn't lead to listing page")
+                
+                # Fallback: Check if current page has rental listings even if LLM didn't confirm
+                # This helps with sites that have dynamic content or unusual structures
+                await page.wait_for_timeout(2000)
+                fallback_check = await page.evaluate("""
+                    () => {
+                        const links = Array.from(document.querySelectorAll('a'));
+                        const rentalPatterns = /huur|rent|kamer|room|woning|house|appartement|apartment/i;
+                        const rentalLinks = links.filter(a => 
+                            rentalPatterns.test(a.href) || 
+                            rentalPatterns.test(a.textContent)
+                        );
+                        return rentalLinks.length;
+                    }
+                """)
+                
+                if fallback_check >= 5:
+                    logger.info(f"Fallback detection found {fallback_check} rental-related links, using current page")
                     return page.url
                 
                 # If not, check if we need to go deeper
@@ -482,7 +509,33 @@ Respond with JSON: {{"link": "URL", "reason": "explanation"}}
             
             if not html_sample:
                 logger.error("Could not find listing items on page")
-                return None
+                
+                # Fallback: Try to find any rental-related links
+                logger.info("Attempting fallback: looking for rental-related links")
+                fallback_sample = await page.evaluate("""
+                    () => {
+                        const links = Array.from(document.querySelectorAll('a'));
+                        const rentalPatterns = /huur|rent|kamer|room|woning|house|appartement|apartment|verhuur/i;
+                        const rentalLinks = links.filter(a => 
+                            rentalPatterns.test(a.href) && a.href.includes('http')
+                        );
+                        
+                        if (rentalLinks.length >= 3) {
+                            return rentalLinks.slice(0, 2).map(link => ({
+                                html: link.outerHTML.substring(0, 2000),
+                                text: link.innerText.substring(0, 500),
+                                url: link.href
+                            }));
+                        }
+                        return [];
+                    }
+                """)
+                
+                if fallback_sample and len(fallback_sample) >= 2:
+                    logger.info(f"Fallback found {len(fallback_sample)} sample listings")
+                    html_sample = fallback_sample
+                else:
+                    return None
             
             # Ask LLM to analyze the structure
             analysis_prompt = f"""Analyze these house listing HTML samples to determine how to extract information.
