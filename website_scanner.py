@@ -3,6 +3,8 @@ Website scanner using Playwright and LLM to discover house listings.
 
 This module uses an LLM to intelligently navigate a website to find house listing pages
 for a given city, then extracts structured information about each house.
+
+IMPORTANT: This file may not contain provider-specific processing (should be in logs/provider_templates.json).
 """
 
 import asyncio
@@ -355,6 +357,81 @@ Respond with JSON: {{"link": "URL", "reason": "explanation"}}
             logger.error(f"Error using search/filter: {e}")
             return False
     
+    async def fetch_missing_info_from_link(self, page: Page, title: Optional[str], price: Optional[int], 
+                                           fallback_rules: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Fetch missing title and/or price information from an individual listing page.
+        
+        Args:
+            page: Playwright page object already navigated to the listing URL
+            title: Current title (None if missing)
+            price: Current price (None if missing)
+            fallback_rules: Extraction rules for the individual listing page
+            
+        Returns:
+            Dict with keys 'title' and 'price' containing fetched values
+        """
+        result = {}
+        
+        try:
+            if not fallback_rules:
+                return result
+                
+            # If title is missing, try to extract it
+            if not title and fallback_rules.get("title"):
+                title_rule = fallback_rules["title"]
+                title_selector = title_rule.get("selector", "")
+                title_attr = title_rule.get("attribute", "text")
+                
+                if title_selector:
+                    try:
+                        if title_attr == "text":
+                            fetched_title = await page.text_content(title_selector)
+                        else:
+                            fetched_title = await page.get_attribute(title_selector, title_attr)
+                        
+                        if fetched_title:
+                            result["title"] = fetched_title.strip()
+                            logger.debug(f"Fetched title from listing page: {result['title']}")
+                    except Exception as e:
+                        logger.debug(f"Could not fetch title using selector '{title_selector}': {e}")
+            
+            # If price is missing, try to extract it
+            if price is None and fallback_rules.get("price"):
+                price_rule = fallback_rules["price"]
+                price_selector = price_rule.get("selector", "")
+                price_pattern = price_rule.get("pattern", r"€?\s*([0-9][0-9.,]+)")
+                
+                try:
+                    if price_selector:
+                        price_text = await page.text_content(price_selector)
+                    else:
+                        # Fallback: get all text content
+                        price_text = await page.text_content("body")
+                    
+                    if price_text:
+                        # Extract price using pattern
+                        try:
+                            pattern = re.compile(price_pattern, re.IGNORECASE)
+                            match = pattern.search(price_text)
+                            if match:
+                                price_str = match.group(1).replace(",", "").replace(".", "")
+                                fetched_price = int(price_str)
+                                # Sanity check
+                                if 200 <= fetched_price <= 5000:
+                                    result["price"] = fetched_price
+                                    logger.debug(f"Fetched price from listing page: €{fetched_price}")
+                        except (ValueError, IndexError, AttributeError):
+                            pass
+                except Exception as e:
+                    logger.debug(f"Could not fetch price from listing page: {e}")
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error fetching missing info from link: {e}", exc_info=True)
+            return result
+
     async def _analyze_listing_structure(self, page: Page) -> Optional[Dict[str, Any]]:
         """
         Analyze the listing page to determine how to extract house information.
@@ -451,9 +528,11 @@ Be specific and use the actual class names and structure you see in the HTML and
 """
             
             extraction_rules = await self._call_llm(analysis_prompt)
-            
+
             if extraction_rules:
-                logger.info(f"LLM generated extraction rules: {json.dumps(extraction_rules, indent=2)}")
+                # Heuristic sanitization to reduce bad addresses and null prices
+                extraction_rules = self._sanitize_extraction_rules(html_sample, extraction_rules)
+                logger.info(f"Finalized extraction rules: {json.dumps(extraction_rules, indent=2)}")
                 return extraction_rules
             
             return None
@@ -490,6 +569,74 @@ Be specific and use the actual class names and structure you see in the HTML and
             
         except Exception as e:
             logger.error(f"Error saving to log: {e}", exc_info=True)
+
+    def _sanitize_extraction_rules(self, html_sample: List[Dict[str, Any]], rules: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply simple heuristics to improve address and price extraction.
+
+        - Avoid addresses like generic labels (e.g., "Short stay", "Studio", "Appartement").
+        - Prefer extracting address from URL when visible text seems generic.
+        - Ensure price has a robust pattern and selector if possible.
+        """
+        try:
+            sanitized = dict(rules)
+
+            # Address heuristics
+            bad_keywords = {"short stay", "studio", "appartement", "woning", "kamer", "huur", "rent", "te huur"}
+            addr = sanitized.get("address", {}) or {}
+            selector = (addr.get("selector") or "").strip()
+            # If selector likely points to a badge or generic label, make address optional or extract from URL
+            if selector:
+                # Look for classes in sample HTML indicating badges
+                sample_texts = "\n".join([s.get("text", "") for s in html_sample]).lower()
+                # If common generic words are present near address text, disable selector
+                if any(k in sample_texts for k in bad_keywords):
+                    addr["selector"] = ""  # disable unreliable selector
+                    addr["optional"] = True
+            # If no reliable address selector, prefer title selector as address
+            if not selector:
+                title = sanitized.get("title", {}) or {}
+                title_sel = (title.get("selector") or "").strip()
+                if title_sel:
+                    addr["selector"] = title_sel
+                    addr.setdefault("attribute", "text")
+                    addr["optional"] = True
+
+            # Prefer extracting from URL if URLs look structured
+            urls = [s.get("url", "") for s in html_sample if s.get("url")]
+            if urls:
+                # Heuristic: last path segment often is street name
+                try:
+                    from urllib.parse import urlparse
+                    segs = [list(filter(None, urlparse(u).path.split('/'))) for u in urls]
+                    # If last segments look like words (not IDs), enable URL extraction
+                    last_segments = [s[-1] if s else "" for s in segs]
+                    alpha_count = sum(1 for ls in last_segments if re.search(r"[a-zA-Z]", ls))
+                    if alpha_count >= max(1, len(last_segments)//2) and not addr.get("extract_from_url"):
+                        addr["extract_from_url"] = True
+                        addr.setdefault("attribute", "text")
+                        addr["url_instructions"] = "last path segment is the address"
+                    elif alpha_count == 0:
+                        # Likely UUIDs: disable URL extraction
+                        addr["extract_from_url"] = False
+                except Exception:
+                    pass
+            sanitized["address"] = addr
+
+            # Price heuristics: ensure a robust pattern
+            price = sanitized.get("price", {}) or {}
+            if not price.get("pattern"):
+                price["pattern"] = r"€?\s*([0-9][0-9.,]{2,})"
+            # If no selector, leave pattern to match within container text
+            sanitized["price"] = price
+
+            # Container selector fallback: ensure it's present
+            if not sanitized.get("container_selector"):
+                sanitized["container_selector"] = '[class*="listing"], [class*="property"], article'
+
+            return sanitized
+        except Exception as e:
+            logger.debug(f"Sanitization skipped due to error: {e}")
+            return rules
 
 
 async def scan_website(website_url: str, city: str = "nijmegen") -> Optional[Dict[str, Any]]:

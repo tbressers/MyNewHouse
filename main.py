@@ -2,6 +2,8 @@
 """
 House scraper v3: Uses LLM-guided website scanner to discover and extract listings.
 Each provider website is analyzed once to determine extraction rules, then used for scraping.
+
+IMPORTANT: This file may not contain provider-specific processing (should be in logs/provider_templates.json).
 """
 
 import asyncio
@@ -150,66 +152,96 @@ async def extract_listings_from_page(page: Page, scan_record: Dict[str, Any]) ->
         return []
     
     try:
-        # Extract listings using the rules
-        listings = await page.evaluate("""
+        evaluate_script = r"""
             (rules) => {
-                const container_selector = rules.container_selector;
-                const containers = document.querySelectorAll(container_selector);
-                
-                const results = [];
-                
-                for (const container of containers) {
-                    const listing = {};
-                    
-                    // Extract title
-                    if (rules.title && rules.title.selector) {
-                        const titleEl = container.querySelector(rules.title.selector);
-                        if (titleEl) {
-                            const attr = rules.title.attribute || 'text';
-                            listing.title = attr === 'text' ? titleEl.innerText.trim() : titleEl.getAttribute(attr);
-                        }
-                    }
-                    
-                    // Extract URL
-                    if (rules.url) {
-                        if (rules.url.selector) {
-                            const urlEl = container.querySelector(rules.url.selector);
-                            if (urlEl) {
-                                const attr = rules.url.attribute || 'href';
-                                listing.url = attr === 'href' ? urlEl.href : urlEl.getAttribute(attr);
+                try {
+                    const containerSelector = rules.container_selector;
+                    const containers = document.querySelectorAll(containerSelector);
+                    const results = [];
+
+                    for (const container of containers) {
+                        const listing = {};
+
+                        if (rules.title) {
+                            if (rules.title.selector) {
+                                const titleEl = container.querySelector(rules.title.selector);
+                                if (titleEl) {
+                                    const attr = rules.title.attribute || 'text';
+                                    listing.title = attr === 'text' ? titleEl.innerText.trim() : titleEl.getAttribute(attr);
+                                }
+                            } else {
+                                listing.title = container.innerText.split('\n').map(t => t.trim()).find(Boolean) || '';
                             }
-                        } else {
-                            // If no selector, use container itself (when container is <a> tag)
-                            const attr = rules.url.attribute || 'href';
-                            listing.url = attr === 'href' ? container.href : container.getAttribute(attr);
+                        }
+
+                        if (rules.url) {
+                            if (rules.url.selector) {
+                                const urlEl = container.querySelector(rules.url.selector);
+                                if (urlEl) {
+                                    const attr = rules.url.attribute || 'href';
+                                    listing.url = attr === 'href' ? urlEl.href : urlEl.getAttribute(attr);
+                                }
+                            } else {
+                                const attr = rules.url.attribute || 'href';
+                                listing.url = attr === 'href' ? container.href : container.getAttribute(attr);
+                            }
+                        }
+
+                        if (rules.price) {
+                            if (rules.price.selector) {
+                                const priceEl = container.querySelector(rules.price.selector);
+                                if (priceEl) {
+                                    listing.price_text = priceEl.innerText.trim();
+                                }
+                            }
+
+                            if (!listing.price_text) {
+                                const text = container.innerText || '';
+                                const patternStr = rules.price.pattern || "€?\\s*([0-9][0-9.,]+)";
+                                let pattern;
+                                try {
+                                    pattern = new RegExp(patternStr, 'i');
+                                } catch (e) {
+                                    pattern = /€?\\s*([0-9][0-9.,]+)/i;
+                                }
+                                const m = text.match(pattern);
+                                if (m) listing.price_text = m[0];
+                            }
+                        }
+
+                        if (rules.address) {
+                            if (rules.address.selector) {
+                                const addressEl = container.querySelector(rules.address.selector);
+                                if (addressEl) {
+                                    const attr = rules.address.attribute || 'text';
+                                    listing.address = attr === 'text' ? addressEl.innerText.trim() : addressEl.getAttribute(attr);
+                                }
+                            }
+                            if (!listing.address) {
+                                const lines = (container.innerText || '').split('\n').map(l => l.trim()).filter(Boolean);
+                                if (lines.length) listing.address = lines[0];
+                            }
+                        }
+
+                        if (listing.url) {
+                            results.push(listing);
                         }
                     }
-                    
-                    // Extract price
-                    if (rules.price && rules.price.selector) {
-                        const priceEl = container.querySelector(rules.price.selector);
-                        if (priceEl) {
-                            listing.price_text = priceEl.innerText.trim();
-                    }
+
+                    return results;
+                } catch (e) {
+                    return { __error: e.message || String(e) };
                 }
-                
-                // Extract address (optional)
-                if (rules.address && rules.address.selector) {
-                    const addressEl = container.querySelector(rules.address.selector);
-                    if (addressEl) {
-                        const attr = rules.address.attribute || 'text';
-                        listing.address = attr === 'text' ? addressEl.innerText.trim() : addressEl.getAttribute(attr);
-                    }
-                }                    // Only add if we have at least a URL
-                    if (listing.url) {
-                        results.push(listing);
-                    }
-                }
-                
-                return results;
             }
-        """, rules)
+        """
+
+        # Extract listings using the rules
+        listings = await page.evaluate(evaluate_script, rules)
         
+        if isinstance(listings, dict) and listings.get("__error"):
+            logger.error(f"Error inside page.evaluate: {listings['__error']}")
+            return []
+
         # Process listings
         processed_listings = []
         for listing in listings:
@@ -244,7 +276,7 @@ async def extract_listings_from_page(page: Page, scan_record: Dict[str, Any]) ->
                             address = path_segments[-2] if len(path_segments) >= 2 else ""
                         elif "third-to-last" in url_instructions.lower():
                             address = path_segments[-3] if len(path_segments) >= 3 else ""
-                        elif "after city" in url_instructions.lower():
+                        elif "after" in url_instructions.lower() and "city" in url_instructions.lower():
                             # Look for city name in segments
                             city_lower = scan_record.get("city", "").lower()
                             try:
@@ -253,6 +285,15 @@ async def extract_listings_from_page(page: Page, scan_record: Dict[str, Any]) ->
                                     address = path_segments[city_idx + 1]
                             except StopIteration:
                                 pass
+                        elif "after" in url_instructions.lower():
+                            # Generic "after" instruction - find specific marker
+                            for marker in ["kamer-huren", "huur-", "verhuur", "woning"]:
+                                for i, seg in enumerate(path_segments):
+                                    if marker.lower() in seg.lower() and i + 1 < len(path_segments):
+                                        address = path_segments[i + 1]
+                                        break
+                                if address:
+                                    break
                         
                         if address:
                             # Clean up the address
@@ -305,6 +346,131 @@ def extract_price_from_text(text: str) -> int:
                 continue
     
     return 0
+
+
+async def fetch_missing_from_link(browser: Browser, listing: Dict[str, Any], 
+                                  scan_record: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Fetch missing title and/or price information from an individual listing page.
+    
+    Args:
+        browser: Playwright browser instance
+        listing: Current listing dict with title, link, price, address
+        scan_record: Record with extraction_rules and fallback_rules
+        
+    Returns:
+        Updated listing dict with fetched information
+    """
+    updated_listing = listing.copy()
+    link = listing.get("link", "")
+    
+    # Check if we have fallback rules
+    fallback_rules = scan_record.get("fallback_rules")
+    if not fallback_rules:
+        return updated_listing
+    
+    # Check if we need to fetch anything
+    needs_title = not listing.get("title")
+    needs_price = listing.get("price") is None or listing.get("price") == 0
+    
+    if not (needs_title or needs_price):
+        return updated_listing
+    
+    if not link:
+        return updated_listing
+    
+    context = None
+    page = None
+    try:
+        context = await browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
+        )
+        page = await context.new_page()
+        
+        await page.goto(link, wait_until='networkidle', timeout=30000)
+        await asyncio.sleep(1)
+        
+        # Try to dismiss consent dialogs
+        for consent_sel in [
+            "button:has-text('Accept')",
+            "button:has-text('Akkoord')",
+            "button:has-text('Alles accepteren')",
+            "button:has-text('Allow all')"
+        ]:
+            try:
+                btn = await page.query_selector(consent_sel)
+                if btn:
+                    await btn.click()
+                    await asyncio.sleep(0.5)
+                    break
+            except Exception:
+                pass
+        
+        # Fetch title if missing
+        if needs_title and fallback_rules.get("title"):
+            title_rule = fallback_rules["title"]
+            title_selector = title_rule.get("selector", "")
+            title_attr = title_rule.get("attribute", "text")
+            
+            if title_selector:
+                try:
+                    if title_attr == "text":
+                        fetched_title = await page.text_content(title_selector)
+                    else:
+                        fetched_title = await page.get_attribute(title_selector, title_attr)
+                    
+                    if fetched_title:
+                        updated_listing["title"] = fetched_title.strip()
+                        logger.debug(f"Fetched title from {link}: {updated_listing['title']}")
+                except Exception as e:
+                    logger.debug(f"Could not fetch title from {link}: {e}")
+        
+        # Fetch price if missing
+        if needs_price and fallback_rules.get("price"):
+            price_rule = fallback_rules["price"]
+            price_selector = price_rule.get("selector", "")
+            price_pattern = price_rule.get("pattern", r"€?\s*([0-9][0-9.,]+)")
+            
+            try:
+                price_text = None
+                if price_selector:
+                    # Try to find element with selector
+                    try:
+                        price_text = await page.text_content(price_selector, timeout=5000)
+                        if price_text:
+                            logger.debug(f"Found price text with selector '{price_selector}': '{price_text.strip()[:50]}'")
+                    except Exception as e:
+                        logger.debug(f"Selector '{price_selector}' failed: {e}")
+                
+                if not price_text:
+                    # Fallback: get all text content and search
+                    price_text = await page.text_content("body")
+                    logger.debug(f"Using body text fallback for price extraction")
+                
+                if price_text:
+                    # Use the same extraction logic as extract_price_from_text
+                    fetched_price = extract_price_from_text(price_text)
+                    if fetched_price > 0:
+                        updated_listing["price"] = fetched_price
+                        logger.info(f"✓ Fetched price from {link}: €{fetched_price}")
+                    else:
+                        logger.debug(f"Could not extract valid price from text: '{price_text[:100]}'")
+                else:
+                    logger.debug(f"No price text found on page")
+            except Exception as e:
+                logger.warning(f"Could not fetch price from {link}: {e}")
+        
+        return updated_listing
+        
+    except Exception as e:
+        logger.error(f"Error fetching missing info from {link}: {e}")
+        return updated_listing
+    finally:
+        if page:
+            await page.close()
+        if context:
+            await context.close()
 
 
 async def scan_provider(browser: Browser, provider_url: str, city: str) -> tuple[str, List[Dict]]:
@@ -388,6 +554,36 @@ async def scan_provider(browser: Browser, provider_url: str, city: str) -> tuple
                 except Exception as e:
                     logger.warning(f"{provider_name}: Error testing container selector: {e}")
             
+            # Fetch missing information from individual listing pages if needed
+            if scan_record.get("fallback_rules"):
+                listings_with_fallback = []
+                for listing in listings:
+                    # Check if title or price is missing
+                    if not listing.get("title") or listing.get("price") is None or listing.get("price") == 0:
+                        logger.debug(f"Fetching missing info from {listing.get('link')}")
+                        listing = await fetch_missing_from_link(browser, listing, scan_record)
+                    listings_with_fallback.append(listing)
+                listings = listings_with_fallback
+            else:
+                # Even without explicit fallback_rules, try to fetch missing prices from individual pages
+                # This provides better coverage when fallback_rules haven't been defined yet
+                listings_with_fallback = []
+                for listing in listings:
+                    if listing.get("price") is None or listing.get("price") == 0:
+                        logger.debug(f"Attempting fallback price fetch from {listing.get('link')}")
+                        # Create minimal fallback rules for price extraction
+                        minimal_rules = {
+                            "price": {
+                                "selector": "[class*='price'], [class*='prijs'], [class*='rent'], [class*='cost']",
+                                "pattern": r"€?\s*([0-9,]+)"
+                            }
+                        }
+                        temp_record = dict(scan_record)
+                        temp_record["fallback_rules"] = minimal_rules
+                        listing = await fetch_missing_from_link(browser, listing, temp_record)
+                    listings_with_fallback.append(listing)
+                listings = listings_with_fallback
+            
             # Tag with city
             for listing in listings:
                 listing["city"] = city
@@ -401,6 +597,7 @@ async def scan_provider(browser: Browser, provider_url: str, city: str) -> tuple
     except Exception as e:
         logger.error(f"Error scanning {provider_name}: {e}", exc_info=True)
         return provider_name, []
+
 
 
 def load_existing_links() -> Set[str]:
